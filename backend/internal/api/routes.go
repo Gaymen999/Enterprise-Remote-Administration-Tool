@@ -59,6 +59,48 @@ func isOriginAllowed(origin string) bool {
 	return false
 }
 
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+
+		if isOriginAllowed(origin) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+		}
+
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+func rateLimitMiddleware(rl *RateLimiter) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !rl.Allow(getClientIP(r)) {
+				http.Error(w, `{"error": "rate limit exceeded"}`, http.StatusTooManyRequests)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+func secureHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("X-XSS-Protection", "1; mode=block")
+		w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		next.ServeHTTP(w, r)
+	})
+}
+
 func NewRouter(deps RouterDeps) http.Handler {
 	r := chi.NewRouter()
 
@@ -67,14 +109,16 @@ func NewRouter(deps RouterDeps) http.Handler {
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Timeout(30 * time.Second))
 	r.Use(corsMiddleware)
+	r.Use(secureHeaders)
 
-	rateLimiter := NewRateLimiter(5, 1*time.Minute)
+	loginRateLimiter := NewRateLimiter(5, 1*time.Minute)
 
 	r.Get("/health", healthHandler)
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Group(func(r chi.Router) {
-			r.Post("/auth/login", loginHandler(deps.DBPool, deps.JWTSecret, rateLimiter))
+			r.Use(rateLimitMiddleware(loginRateLimiter))
+			r.Post("/auth/login", loginHandler(deps.DBPool, deps.JWTSecret, loginRateLimiter))
 			r.Post("/auth/refresh", refreshTokenHandler(deps.DBPool, deps.JWTSecret))
 			r.Post("/auth/logout", logoutHandler())
 			r.Post("/auth/register", registerHandler)
@@ -94,26 +138,6 @@ func NewRouter(deps RouterDeps) http.Handler {
 	})
 
 	return r
-}
-
-func corsMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		origin := r.Header.Get("Origin")
-
-		if isOriginAllowed(origin) {
-			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-			w.Header().Set("Access-Control-Allow-Credentials", "true")
-		}
-
-		if r.Method == "OPTIONS" {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-
-		next.ServeHTTP(w, r)
-	})
 }
 
 func wsHandler(hub *ws.Hub, jwtSecret string, pool *pgxpool.Pool) http.HandlerFunc {

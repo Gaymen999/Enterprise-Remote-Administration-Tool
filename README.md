@@ -206,6 +206,49 @@ RAT_AGENT_TOKEN=<optional-jwt-token>
 
 ---
 
+## Security & Stability Updates (v2.1)
+
+### Agent Stability Improvements
+- **Memory-safe Command Execution**: Command stdout/stderr now wrapped with `io.LimitedBuffer` enforcing a 5MB maximum output size to prevent OOM crashes.
+- **Orphan Process Prevention**: Commands killed on timeout now properly wait for process termination to prevent zombie processes.
+- **Secure Path Sanitization**: Replaced weak null-byte stripping with `filepath.Clean()` and traversal detection to block directory escape attacks.
+
+### Frontend Stability Improvements
+- **Race-condition Safe JWT Refresh**: Implemented `isRefreshing` flag and request queue. Concurrent 401 errors are now serialized - first request triggers refresh, subsequent requests wait and retry with new token.
+- **Seamless SPA Routing**: Replaced `window.location.href` with custom event dispatcher (`auth:event`). SPA state is preserved on auth failures, maintaining component state and navigation history.
+- **Standardized Error Handling**: All Axios errors now formatted into consistent `{ message, status, code, details }` structure before rejection.
+
+---
+
+## Production Readiness (v2.2)
+
+### Enhanced CORS Security
+- Origins strictly parsed from `CORS_ALLOWED_ORIGINS` environment variable.
+- Empty origins rejected in production mode to prevent Cross-Site WebSocket Hijacking (CSWSH).
+- Secure headers (X-Frame-Options, X-Content-Type-Options, Strict-Transport-Security) applied globally.
+
+### Rate Limiting
+- Login endpoint: 5 requests per minute per IP
+- General API: 100 requests per minute per IP
+- Prevents brute-force and DoS attacks.
+
+### Buffered File I/O
+- Agent file downloads now use 64KB chunk-based reading instead of loading entire files into memory.
+- Maximum file size configurable via `MAX_FILE_SIZE` environment variable.
+- Prevents OOM crashes on large file transfers.
+
+### Configurable Directory Whitelisting
+- Agent file operations restricted to configurable allowed directories via `ALLOWED_DIRS` environment variable.
+- Format: `ALLOWED_DIRS=/home,/tmp,/var` (Linux) or `ALLOWED_DIRS=C:\,D:\` (Windows)
+- Default fallback to system directories if not configured.
+
+### WebSocket Stability
+- WSSClient mutex locks now use `defer` to prevent deadlocks.
+- Connection state properly synchronized during reconnection attempts.
+- Proper cleanup of channels and connections on close.
+
+---
+
 ## Deployment Guide
 
 ### 1. Generate Production Environment File

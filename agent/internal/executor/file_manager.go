@@ -9,6 +9,11 @@ import (
 	"strings"
 )
 
+const (
+	defaultMaxFileSize = 100 * 1024 * 1024
+	chunkSize          = 64 * 1024
+)
+
 type FileManager struct {
 	allowedDirs []string
 	maxFileSize int64
@@ -31,17 +36,46 @@ type FileOperationResult struct {
 }
 
 func NewFileManager() *FileManager {
-	var allowedDirs []string
-	if isWindows() {
-		allowedDirs = []string{"C:\\", "D:\\"}
-	} else {
-		allowedDirs = []string{"/", "/home", "/tmp", "/var", "/etc"}
-	}
+	envDirs := os.Getenv("ALLOWED_DIRS")
+	allowedDirs := parseAllowedDirs(envDirs)
+	maxFileSize := parseMaxFileSize()
 
 	return &FileManager{
 		allowedDirs: allowedDirs,
-		maxFileSize: 100 * 1024 * 1024,
+		maxFileSize: maxFileSize,
 	}
+}
+
+func parseAllowedDirs(env string) []string {
+	if env == "" {
+		if isWindows() {
+			return []string{"C:\\", "D:\\"}
+		}
+		return []string{"/", "/home", "/tmp", "/var", "/etc"}
+	}
+
+	dirs := strings.Split(env, ",")
+	result := make([]string, 0, len(dirs))
+	for _, d := range dirs {
+		d = strings.TrimSpace(d)
+		if d != "" {
+			result = append(result, d)
+		}
+	}
+	return result
+}
+
+func parseMaxFileSize() int64 {
+	env := os.Getenv("MAX_FILE_SIZE")
+	if env == "" {
+		return defaultMaxFileSize
+	}
+	var size int64
+	fmt.Sscanf(env, "%d", &size)
+	if size <= 0 {
+		return defaultMaxFileSize
+	}
+	return size
 }
 
 func (fm *FileManager) HandleFileOperation(payload map[string]interface{}) *FileOperationResult {
@@ -215,7 +249,7 @@ func (fm *FileManager) downloadFile(path string, requestID string) *FileOperatio
 		}
 	}
 
-	data, err := os.ReadFile(path)
+	data, err := fm.readFileBuffered(path)
 	if err != nil {
 		return &FileOperationResult{
 			Success:   false,
@@ -377,4 +411,33 @@ func ReadFileChunk(path string, offset int64, size int) ([]byte, error) {
 	}
 
 	return buffer[:n], nil
+}
+
+func (fm *FileManager) readFileBuffered(path string) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	data := make([]byte, 0, 4096)
+	buf := make([]byte, chunkSize)
+
+	for {
+		n, err := file.Read(buf)
+		if n > 0 {
+			data = append(data, buf[:n]...)
+			if len(data) > int(fm.maxFileSize) {
+				return nil, fmt.Errorf("file too large during read")
+			}
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return data, nil
 }

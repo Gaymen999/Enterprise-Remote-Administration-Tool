@@ -48,6 +48,9 @@ func NewWSSClient(serverURL, token, enrollmentSecret string, identity *config.Id
 }
 
 func (c *WSSClient) Connect() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	u, err := url.Parse(c.serverURL)
 	if err != nil {
 		return err
@@ -84,6 +87,7 @@ func (c *WSSClient) Connect() error {
 
 	if err := c.sendHandshake(); err != nil {
 		conn.Close()
+		c.conn = nil
 		return err
 	}
 
