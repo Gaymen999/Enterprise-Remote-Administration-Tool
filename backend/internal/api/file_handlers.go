@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -141,23 +142,32 @@ func isValidOperation(op string) bool {
 
 func sanitizeFilePath(path string) string {
 	path = strings.TrimSpace(path)
-	path = strings.ReplaceAll(path, "..", "")
 	path = strings.ReplaceAll(path, "\x00", "")
-	path = strings.TrimSuffix(path, "/")
-	path = strings.TrimSuffix(path, "\\")
 
-	if path == "" || path == "/" {
-		if isWindows() {
+	cleanPath := filepath.Clean(path)
+	if cleanPath == "." || cleanPath == "" {
+		if runtimeGOOS() == "windows" {
 			return "C:\\"
 		}
 		return "/"
 	}
 
-	return path
+	if strings.HasPrefix(cleanPath, "..") {
+		if runtimeGOOS() == "windows" {
+			return "C:\\"
+		}
+		return "/"
+	}
+
+	if !filepath.IsAbs(cleanPath) {
+		return cleanPath
+	}
+
+	return cleanPath
 }
 
-func isWindows() bool {
-	return len("\\") > 0
+func runtimeGOOS() string {
+	return "windows"
 }
 
 func generateRequestID() string {

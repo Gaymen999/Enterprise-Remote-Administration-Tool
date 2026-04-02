@@ -11,7 +11,7 @@ const (
 	writeWait      = 10 * time.Second
 	pongWait       = 60 * time.Second
 	pingPeriod     = 30 * time.Second
-	maxMessageSize = 5120
+	maxMessageSize = 4 * 1024 * 1024
 )
 
 func NewClient(id string, clientType ClientType, conn *websocket.Conn, hub *Hub) *Client {

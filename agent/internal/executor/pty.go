@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -25,6 +26,9 @@ type PtySession struct {
 	Rows   int
 	closed bool
 	mu     sync.Mutex
+	ctx    context.Context
+	cancel context.CancelFunc
+	output chan []byte
 }
 
 func NewPtyHandler() *PtyHandler {
@@ -121,10 +125,13 @@ func (h *PtyHandler) startSession(payload map[string]interface{}) (*models.Comma
 
 func (h *PtyHandler) createPtySession(sessionID, shell string, cols, rows int) (*PtySession, error) {
 	session := &PtySession{
-		ID:   sessionID,
-		Cols: cols,
-		Rows: rows,
+		ID:     sessionID,
+		Cols:   cols,
+		Rows:   rows,
+		output: make(chan []byte, 100),
 	}
+
+	session.ctx, session.cancel = context.WithCancel(context.Background())
 
 	if isWindows() {
 		return session, h.createWindowsSession(session, shell)
@@ -276,9 +283,18 @@ func (s *PtySession) close() error {
 	}
 	s.closed = true
 
+	if s.cancel != nil {
+		s.cancel()
+	}
+
 	if s.Stdin != nil {
 		s.Stdin.Close()
 	}
+
+	if s.output != nil {
+		close(s.output)
+	}
+
 	if s.Cmd != nil && s.Cmd.Process != nil {
 		s.Cmd.Process.Kill()
 		s.Cmd.Wait()

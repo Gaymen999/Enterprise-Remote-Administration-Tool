@@ -17,7 +17,7 @@ const (
 	maxRetries        = 10
 	pingInterval      = 25 * time.Second
 	pongWait          = 40 * time.Second
-	maxMessageSize    = 5120
+	maxMessageSize    = 4 * 1024 * 1024
 	reconnectDelay    = 5 * time.Second
 	maxReconnectDelay = 60 * time.Second
 )

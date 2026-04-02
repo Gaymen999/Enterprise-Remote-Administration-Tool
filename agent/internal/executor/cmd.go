@@ -5,52 +5,11 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
-	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
 	"github.com/enterprise-rat/agent/internal/models"
 )
-
-var allowedCommands = map[string]bool{
-	"powershell.exe": true,
-	"powershell":     true,
-	"cmd.exe":        true,
-	"cmd":            true,
-	"python":         true,
-	"python3":        true,
-	"python2":        true,
-	"bash":           true,
-	"sh":             true,
-	"zsh":            true,
-	"pwsh":           true,
-	"echo":           true,
-	"dir":            true,
-	"ls":             true,
-	"cat":            true,
-	"type":           true,
-	"whoami":         true,
-	"hostname":       true,
-	"systeminfo":     true,
-	"ipconfig":       true,
-	"ifconfig":       true,
-	"netstat":        true,
-	"ps":             true,
-	"tasklist":       true,
-	"pwd":            true,
-	"cd":             true,
-	"curl":           true,
-	"wget":           true,
-}
-
-var dangerousPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)(rm\s+-rf\s+/|mkfs|format\s+\w+:|del\s+/[sqf]\s+|Remove-Item\s+-Recurse\s+-Force)`),
-	regexp.MustCompile(`(?i)(wget|curl)\s+http.*\|.*(sh|bash|python)`),
-	regexp.MustCompile(`(?i)(eval|exec)\s*\(`),
-	regexp.MustCompile(`(?i)(nc\s+-e|bash\s+-i|sh\s+-i)`),
-	regexp.MustCompile(`(?i)(?:>/dev/|</dev/|2>&1).*(?:base64|nc\s)`),
-}
 
 func ExecuteCommand(req *models.CommandRequest) *models.CommandResponse {
 	resp := &models.CommandResponse{
@@ -66,20 +25,9 @@ func ExecuteCommand(req *models.CommandRequest) *models.CommandResponse {
 	}
 
 	executable := sanitizePath(req.Executable)
-	if !isCommandAllowed(executable) {
-		resp.ExitCode = -1
-		resp.ErrorMsg = "command not allowed"
-		resp.StdErr = fmt.Sprintf("executable '%s' is not in the allowed list", executable)
-		return resp
-	}
-
+	sanitizedArgs := make([]string, 0, len(req.Args))
 	for _, arg := range req.Args {
-		sanitizedArg := sanitizePath(arg)
-		if containsDangerousPattern(sanitizedArg) {
-			resp.ExitCode = -1
-			resp.ErrorMsg = "command contains potentially dangerous pattern"
-			return resp
-		}
+		sanitizedArgs = append(sanitizedArgs, sanitizePath(arg))
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(req.TimeoutSeconds)*time.Second)
@@ -87,7 +35,7 @@ func ExecuteCommand(req *models.CommandRequest) *models.CommandResponse {
 
 	var stdout, stderr bytes.Buffer
 
-	cmd := exec.Command(executable, req.Args...)
+	cmd := exec.Command(executable, sanitizedArgs...)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
@@ -116,27 +64,6 @@ func ExecuteCommand(req *models.CommandRequest) *models.CommandResponse {
 
 func sanitizePath(path string) string {
 	path = strings.TrimSpace(path)
-	path = filepath.Clean(path)
-	path = strings.ReplaceAll(path, ";", "")
-	path = strings.ReplaceAll(path, "|", "")
-	path = strings.ReplaceAll(path, "&", "")
-	path = strings.ReplaceAll(path, "$", "")
-	path = strings.ReplaceAll(path, "`", "")
-	path = strings.ReplaceAll(path, "\n", "")
-	path = strings.ReplaceAll(path, "\r", "")
+	path = strings.ReplaceAll(path, "\x00", "")
 	return path
-}
-
-func isCommandAllowed(executable string) bool {
-	execName := strings.ToLower(filepath.Base(executable))
-	return allowedCommands[execName]
-}
-
-func containsDangerousPattern(input string) bool {
-	for _, pattern := range dangerousPatterns {
-		if pattern.MatchString(input) {
-			return true
-		}
-	}
-	return false
 }
