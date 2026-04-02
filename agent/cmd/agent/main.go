@@ -21,12 +21,16 @@ func main() {
 
 	serverURL := os.Getenv("RAT_SERVER_URL")
 	if serverURL == "" {
-		serverURL = "ws://localhost:8080/api/v1/ws"
+		log.Fatal("RAT_SERVER_URL environment variable is required")
 	}
 
 	token := os.Getenv("RAT_AGENT_TOKEN")
+	enrollmentSecret := os.Getenv("AGENT_ENROLLMENT_SECRET")
 
-	wssClient := client.NewWSSClient(serverURL, token, identity)
+	log.Printf("[CONFIG] Server URL: %s", serverURL)
+	log.Printf("[CONFIG] Enrollment Secret: %s", maskSecret(enrollmentSecret))
+
+	wssClient := client.NewWSSClient(serverURL, token, enrollmentSecret, identity)
 	go wssClient.Run()
 
 	quit := make(chan os.Signal, 1)
@@ -35,4 +39,14 @@ func main() {
 
 	log.Println("Shutting down agent...")
 	wssClient.Close()
+}
+
+func maskSecret(s string) string {
+	if s == "" {
+		return "(not set)"
+	}
+	if len(s) <= 4 {
+		return "****"
+	}
+	return s[:4] + "****"
 }

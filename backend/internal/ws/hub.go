@@ -14,16 +14,16 @@ const (
 type ClientType string
 
 const (
-	ClientTypeAgent  ClientType = "agent"
+	ClientTypeAgent ClientType = "agent"
 	ClientTypeAdmin ClientType = "admin"
 )
 
 type Client struct {
-	ID     string
-	Type   ClientType
-	Conn   *websocket.Conn
-	Send   chan []byte
-	Hub    *Hub
+	ID   string
+	Type ClientType
+	Conn *websocket.Conn
+	Send chan []byte
+	Hub  *Hub
 }
 
 type Hub struct {
@@ -33,6 +33,7 @@ type Hub struct {
 	broadcast  chan []byte
 	register   chan *Client
 	unregister chan *Client
+	ptyManager *PtyManager
 	mu         sync.RWMutex
 }
 
@@ -44,6 +45,7 @@ func NewHub() *Hub {
 		broadcast:  make(chan []byte),
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
+		ptyManager: NewPtyManager(nil),
 	}
 }
 

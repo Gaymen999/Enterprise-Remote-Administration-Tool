@@ -49,7 +49,7 @@ var dangerousPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)(wget|curl)\s+http.*\|.*(sh|bash|python)`),
 	regexp.MustCompile(`(?i)(eval|exec)\s*\(`),
 	regexp.MustCompile(`(?i)(nc\s+-e|bash\s+-i|sh\s+-i)`),
-	regexp.MustCompile(`(?i)(>/dev/|</dev/|2>&1).*\(base64|nc\s)`),
+	regexp.MustCompile(`(?i)(?:>/dev/|</dev/|2>&1).*(?:base64|nc\s)`),
 }
 
 func ExecuteCommand(req *models.CommandRequest) *models.CommandResponse {

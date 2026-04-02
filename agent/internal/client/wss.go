@@ -15,29 +15,35 @@ import (
 
 const (
 	maxRetries        = 10
-	pingInterval      = 20 * time.Second
-	pongWait          = 15 * time.Second
+	pingInterval      = 25 * time.Second
+	pongWait          = 40 * time.Second
 	maxMessageSize    = 5120
 	reconnectDelay    = 5 * time.Second
 	maxReconnectDelay = 60 * time.Second
 )
 
 type WSSClient struct {
-	serverURL  string
-	identity   *config.Identity
-	token      string
-	conn       *websocket.Conn
-	done       chan struct{}
-	shouldStop bool
-	mu         sync.Mutex
+	serverURL        string
+	enrollmentSecret string
+	identity         *config.Identity
+	token            string
+	conn             *websocket.Conn
+	done             chan struct{}
+	shouldStop       bool
+	mu               sync.Mutex
+	ptyHandler       *executor.PtyHandler
+	fileManager      *executor.FileManager
 }
 
-func NewWSSClient(serverURL, token string, identity *config.Identity) *WSSClient {
+func NewWSSClient(serverURL, token, enrollmentSecret string, identity *config.Identity) *WSSClient {
 	return &WSSClient{
-		serverURL: serverURL,
-		token:     token,
-		identity:  identity,
-		done:      make(chan struct{}),
+		serverURL:        serverURL,
+		enrollmentSecret: enrollmentSecret,
+		token:            token,
+		identity:         identity,
+		done:             make(chan struct{}),
+		ptyHandler:       executor.NewPtyHandler(),
+		fileManager:      executor.NewFileManager(),
 	}
 }
 
@@ -88,6 +94,14 @@ func (c *WSSClient) Connect() error {
 }
 
 func (c *WSSClient) sendHandshake() error {
+	header := make(map[string][]string)
+	if c.token != "" {
+		header["Authorization"] = []string{"Bearer " + c.token}
+	}
+	if c.enrollmentSecret != "" {
+		header["X-Agent-Enrollment-Secret"] = []string{c.enrollmentSecret}
+	}
+
 	return c.conn.WriteJSON(map[string]interface{}{
 		"type": "agent_register",
 		"payload": map[string]interface{}{
@@ -176,8 +190,73 @@ func (c *WSSClient) handleMessage(msg map[string]interface{}) {
 	switch msgType {
 	case "command":
 		go c.executeCommand(msg)
+	case "pty":
+		go c.handlePty(msg)
+	case "file_manager":
+		go c.handleFileManager(msg)
 	default:
 		log.Printf("[WSS] Unknown message type: '%s'", msgType)
+	}
+}
+
+func (c *WSSClient) handlePty(msg map[string]interface{}) {
+	payload, ok := msg["payload"].(map[string]interface{})
+	if !ok {
+		log.Printf("[PTY] Invalid payload")
+		return
+	}
+
+	resp, shouldSend := c.ptyHandler.HandlePtyCommand(payload)
+	if resp != nil && shouldSend {
+		c.sendPtyResponse(resp, payload)
+	}
+}
+
+func (c *WSSClient) sendPtyResponse(resp *models.CommandResponse, payload map[string]interface{}) {
+	sessionID, _ := payload["session_id"].(string)
+
+	output, _ := c.ptyHandler.PollSessionOutput(sessionID)
+
+	msg := map[string]interface{}{
+		"type": "pty_output",
+		"payload": map[string]interface{}{
+			"session_id": sessionID,
+			"data":       output,
+		},
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.conn != nil {
+		if err := c.conn.WriteJSON(msg); err != nil {
+			log.Printf("[PTY] Failed to send PTY output: %v", err)
+		}
+	}
+}
+
+func (c *WSSClient) handleFileManager(msg map[string]interface{}) {
+	payload, ok := msg["payload"].(map[string]interface{})
+	if !ok {
+		log.Printf("[FILE] Invalid payload")
+		return
+	}
+
+	result := c.fileManager.HandleFileOperation(payload)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.conn != nil {
+		response := map[string]interface{}{
+			"type":    "file_result",
+			"payload": result,
+		}
+		if err := c.conn.WriteJSON(response); err != nil {
+			log.Printf("[FILE] Failed to send result: %v", err)
+		} else {
+			log.Printf("[FILE] Operation completed: %s", result.RequestID)
+		}
 	}
 }
 

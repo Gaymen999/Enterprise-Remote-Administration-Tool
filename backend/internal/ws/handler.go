@@ -149,6 +149,10 @@ func (h *Handler) handleMessage(client *Client, msg WSSMessage) {
 		h.handleHeartbeat(client, msg.Payload)
 	case "command_result":
 		h.handleCommandResult(client, msg.Payload)
+	case "pty":
+		h.handlePtyMessage(client, msg)
+	case "pty_output":
+		h.handlePtyOutput(client, msg.Payload)
 	default:
 		log.Printf("[WS] Unknown message type from %s %s: %s", client.Type, client.ID, msg.Type)
 	}
