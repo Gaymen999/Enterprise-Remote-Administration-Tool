@@ -2,10 +2,14 @@ package db
 
 import (
 	"context"
+	"errors"
 	"time"
 
+	"github.com/enterprise-rat/backend/internal/models"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+var ErrAgentNotFound = errors.New("agent not found")
 
 type AgentInfo struct {
 	AgentID   string
@@ -36,4 +40,27 @@ func UpdateAgentStatus(ctx context.Context, pool *pgxpool.Pool, agentID, status 
 	now := time.Now()
 	_, err := pool.Exec(ctx, query, status, now, agentID)
 	return err
+}
+
+func GetAgentByID(ctx context.Context, pool *pgxpool.Pool, agentID string) (*models.Agent, error) {
+	var agent models.Agent
+	query := `
+		SELECT id, hostname, 
+			COALESCE(ip_address::text, '') as ip_address,
+			COALESCE(os_family, '') as os_family,
+			COALESCE(os_version, '') as os_version,
+			COALESCE(agent_version, '') as agent_version,
+			last_seen, status, created_at, updated_at
+		FROM agents 
+		WHERE id = $1
+	`
+	err := pool.QueryRow(ctx, query, agentID).Scan(
+		&agent.ID, &agent.Hostname, &agent.IPAddress,
+		&agent.OSFamily, &agent.OSVersion, &agent.AgentVersion,
+		&agent.LastSeen, &agent.Status, &agent.CreatedAt, &agent.UpdatedAt,
+	)
+	if err != nil {
+		return nil, ErrAgentNotFound
+	}
+	return &agent, nil
 }

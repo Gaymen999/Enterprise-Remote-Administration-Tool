@@ -1,16 +1,89 @@
 package api
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
+	"math/big"
 	"net/http"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
 	"github.com/enterprise-rat/backend/internal/ws"
 	"github.com/go-chi/chi/v5"
 )
+
+var (
+	sandboxBaseDir = getSandboxBaseDir()
+	maxUploadSize  = 10 * 1024 * 1024
+)
+
+func getSandboxBaseDir() string {
+	if baseDir := os.Getenv("SANDBOX_BASE_DIR"); baseDir != "" {
+		return baseDir
+	}
+	if runtimeGOOS() == "windows" {
+		return "C:\\var\\lib\\enterprise-rat\\sandbox"
+	}
+	return "/var/lib/enterprise-rat/sandbox"
+}
+
+func validateSandboxDir() error {
+	info, err := os.Stat(sandboxBaseDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("sandbox directory does not exist: %s", sandboxBaseDir)
+		}
+		return fmt.Errorf("cannot access sandbox directory: %v", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("sandbox path is not a directory: %s", sandboxBaseDir)
+	}
+	return nil
+}
+
+func secureResolvePath(userInput string) (string, error) {
+	userInput = strings.TrimSpace(userInput)
+	userInput = strings.ReplaceAll(userInput, "\x00", "")
+
+	cleanPath := filepath.Clean(userInput)
+
+	if cleanPath == "." || cleanPath == "" {
+		return "", &PathTraversalError{Message: "invalid path: empty or current directory"}
+	}
+
+	absBaseDir, err := filepath.Abs(sandboxBaseDir)
+	if err != nil {
+		return "", &PathTraversalError{Message: "failed to resolve base directory"}
+	}
+
+	joinedPath := filepath.Join(absBaseDir, cleanPath)
+	cleanedFullPath := filepath.Clean(joinedPath)
+
+	if runtimeGOOS() == "windows" {
+		absBaseDir = strings.ToLower(strings.ReplaceAll(absBaseDir, "/", "\\"))
+		cleanedFullPath = strings.ToLower(strings.ReplaceAll(cleanedFullPath, "/", "\\"))
+	}
+
+	if !strings.HasPrefix(cleanedFullPath, absBaseDir) {
+		return "", &PathTraversalError{Message: "access denied: path outside sandbox directory"}
+	}
+
+	return cleanedFullPath, nil
+}
+
+type PathTraversalError struct {
+	Message string
+}
+
+func (e *PathTraversalError) Error() string {
+	return e.Message
+}
 
 type FileOperationPayload struct {
 	Operation string                 `json:"operation"`
@@ -49,7 +122,11 @@ func fileManagerHandler(hub *ws.Hub) http.HandlerFunc {
 			return
 		}
 
-		sanitizedPath := sanitizeFilePath(req.Path)
+		sanitizedPath, err := secureResolvePath(req.Path)
+		if err != nil {
+			http.Error(w, `{"error": "path validation failed: `+err.Error()+`"}`, http.StatusBadRequest)
+			return
+		}
 
 		msg := map[string]interface{}{
 			"type": "file_manager",
@@ -98,7 +175,11 @@ func fileDownloadHandler(hub *ws.Hub) http.HandlerFunc {
 			return
 		}
 
-		sanitizedPath := sanitizeFilePath(filePath)
+		sanitizedPath, err := secureResolvePath(filePath)
+		if err != nil {
+			http.Error(w, `{"error": "path validation failed: `+err.Error()+`"}`, http.StatusBadRequest)
+			return
+		}
 
 		msg := map[string]interface{}{
 			"type": "file_manager",
@@ -140,49 +221,6 @@ func isValidOperation(op string) bool {
 	return validOps[op]
 }
 
-func sanitizeFilePath(path string) string {
-	path = strings.TrimSpace(path)
-	path = strings.ReplaceAll(path, "\x00", "")
-
-	cleanPath := filepath.Clean(path)
-	if cleanPath == "." || cleanPath == "" {
-		if runtimeGOOS() == "windows" {
-			return "C:\\"
-		}
-		return "/"
-	}
-
-	if strings.HasPrefix(cleanPath, "..") {
-		if runtimeGOOS() == "windows" {
-			return "C:\\"
-		}
-		return "/"
-	}
-
-	if !filepath.IsAbs(cleanPath) {
-		return cleanPath
-	}
-
-	return cleanPath
-}
-
-func runtimeGOOS() string {
-	return "windows"
-}
-
-func generateRequestID() string {
-	return time.Now().Format("20060102150405") + "-" + randomString(8)
-}
-
-func randomString(n int) string {
-	const letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-	b := make([]byte, n)
-	for i := range b {
-		b[i] = letters[time.Now().UnixNano()%int64(len(letters))]
-	}
-	return string(b)
-}
-
 func fileUploadHandler(hub *ws.Hub) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -204,7 +242,11 @@ func fileUploadHandler(hub *ws.Hub) http.HandlerFunc {
 			return
 		}
 
-		sanitizedPath := sanitizeFilePath(path)
+		sanitizedPath, err := secureResolvePath(path)
+		if err != nil {
+			http.Error(w, `{"error": "path validation failed: `+err.Error()+`"}`, http.StatusBadRequest)
+			return
+		}
 
 		file, _, err := r.FormFile("file")
 		if err != nil {
@@ -212,6 +254,11 @@ func fileUploadHandler(hub *ws.Hub) http.HandlerFunc {
 			return
 		}
 		defer file.Close()
+
+		if r.ContentLength > int64(maxUploadSize) {
+			http.Error(w, `{"error": "file too large (max 10MB)"}`, http.StatusBadRequest)
+			return
+		}
 
 		content, err := io.ReadAll(file)
 		if err != nil {
@@ -251,30 +298,29 @@ func fileUploadHandler(hub *ws.Hub) http.HandlerFunc {
 }
 
 func encodeBase64(data []byte) string {
-	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-	result := make([]byte, (len(data)+2)/3*4)
-	for i, j := 0, 0; i < len(data); i, j = i+3, j+4 {
-		var val uint32
-		switch len(data) - i {
-		case 1:
-			val = uint32(data[i]) << 16
-			result[j] = alphabet[val>>18&63]
-			result[j+1] = alphabet[val>>12&63]
-			result[j+2] = '='
-			result[j+3] = '='
-		case 2:
-			val = uint32(data[i])<<16 | uint32(data[i+1])<<8
-			result[j] = alphabet[val>>18&63]
-			result[j+1] = alphabet[val>>12&63]
-			result[j+2] = alphabet[val>>6&63]
-			result[j+3] = '='
-		default:
-			val = uint32(data[i])<<16 | uint32(data[i+1])<<8 | uint32(data[i+2])
-			result[j] = alphabet[val>>18&63]
-			result[j+1] = alphabet[val>>12&63]
-			result[j+2] = alphabet[val>>6&63]
-			result[j+3] = alphabet[val&63]
+	return base64.StdEncoding.EncodeToString(data)
+}
+
+func runtimeGOOS() string {
+	return runtime.GOOS
+}
+
+func generateRequestID() string {
+	return time.Now().Format("20060102150405") + "-" + randomString(8)
+}
+
+func randomString(n int) string {
+	const letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		for i := range b {
+			num, _ := rand.Int(rand.Reader, big.NewInt(int64(len(letters))))
+			b[i] = letters[num.Int64()]
 		}
+		return string(b)
 	}
-	return string(result)
+	for i := range b {
+		b[i] = letters[int(b[i])%len(letters)]
+	}
+	return string(b)
 }

@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -13,6 +14,58 @@ const (
 	defaultMaxFileSize = 100 * 1024 * 1024
 	chunkSize          = 64 * 1024
 )
+
+var (
+	sandboxBaseDir = getSandboxBaseDir()
+)
+
+func getSandboxBaseDir() string {
+	if baseDir := os.Getenv("SANDBOX_BASE_DIR"); baseDir != "" {
+		return baseDir
+	}
+	if runtime.GOOS == "windows" {
+		return "C:\\var\\lib\\enterprise-rat\\sandbox"
+	}
+	return "/var/lib/enterprise-rat/sandbox"
+}
+
+func secureResolvePath(userInput string) (string, error) {
+	userInput = strings.TrimSpace(userInput)
+	userInput = strings.ReplaceAll(userInput, "\x00", "")
+
+	cleanPath := filepath.Clean(userInput)
+
+	if cleanPath == "." || cleanPath == "" {
+		return "", &PathTraversalError{Message: "invalid path: empty or current directory"}
+	}
+
+	absBaseDir, err := filepath.Abs(sandboxBaseDir)
+	if err != nil {
+		return "", &PathTraversalError{Message: "failed to resolve base directory"}
+	}
+
+	joinedPath := filepath.Join(absBaseDir, cleanPath)
+	cleanedFullPath := filepath.Clean(joinedPath)
+
+	if runtime.GOOS == "windows" {
+		absBaseDir = strings.ToLower(strings.ReplaceAll(absBaseDir, "/", "\\"))
+		cleanedFullPath = strings.ToLower(strings.ReplaceAll(cleanedFullPath, "/", "\\"))
+	}
+
+	if !strings.HasPrefix(cleanedFullPath, absBaseDir) {
+		return "", &PathTraversalError{Message: "access denied: path outside sandbox directory"}
+	}
+
+	return cleanedFullPath, nil
+}
+
+type PathTraversalError struct {
+	Message string
+}
+
+func (e *PathTraversalError) Error() string {
+	return e.Message
+}
 
 type FileManager struct {
 	allowedDirs []string
@@ -36,33 +89,12 @@ type FileOperationResult struct {
 }
 
 func NewFileManager() *FileManager {
-	envDirs := os.Getenv("ALLOWED_DIRS")
-	allowedDirs := parseAllowedDirs(envDirs)
 	maxFileSize := parseMaxFileSize()
 
 	return &FileManager{
-		allowedDirs: allowedDirs,
+		allowedDirs: []string{sandboxBaseDir},
 		maxFileSize: maxFileSize,
 	}
-}
-
-func parseAllowedDirs(env string) []string {
-	if env == "" {
-		if isWindows() {
-			return []string{"C:\\", "D:\\"}
-		}
-		return []string{"/", "/home", "/tmp", "/var", "/etc"}
-	}
-
-	dirs := strings.Split(env, ",")
-	result := make([]string, 0, len(dirs))
-	for _, d := range dirs {
-		d = strings.TrimSpace(d)
-		if d != "" {
-			result = append(result, d)
-		}
-	}
-	return result
 }
 
 func parseMaxFileSize() int64 {
@@ -91,28 +123,29 @@ func (fm *FileManager) HandleFileOperation(payload map[string]interface{}) *File
 		}
 	}
 
-	if !fm.isPathAllowed(path) {
+	sanitizedPath, err := secureResolvePath(path)
+	if err != nil {
 		return &FileOperationResult{
 			Success:   false,
-			Error:     "access denied: path outside allowed directories",
+			Error:     "path validation failed: " + err.Error(),
 			RequestID: requestID,
 		}
 	}
 
 	switch operation {
 	case "list":
-		return fm.listDirectory(path, requestID)
+		return fm.listDirectory(sanitizedPath, requestID)
 	case "stat":
-		return fm.statFile(path, requestID)
+		return fm.statFile(sanitizedPath, requestID)
 	case "download":
-		return fm.downloadFile(path, requestID)
+		return fm.downloadFile(sanitizedPath, requestID)
 	case "upload":
 		content, _ := payload["content"].(string)
-		return fm.uploadFile(path, content, requestID)
+		return fm.uploadFile(sanitizedPath, content, requestID)
 	case "delete":
-		return fm.deleteFile(path, requestID)
+		return fm.deleteFile(sanitizedPath, requestID)
 	case "mkdir":
-		return fm.createDirectory(path, requestID)
+		return fm.createDirectory(sanitizedPath, requestID)
 	default:
 		return &FileOperationResult{
 			Success:   false,
@@ -120,46 +153,6 @@ func (fm *FileManager) HandleFileOperation(payload map[string]interface{}) *File
 			RequestID: requestID,
 		}
 	}
-}
-
-func (fm *FileManager) isPathAllowed(path string) bool {
-	cleanPath := filepath.Clean(path)
-
-	if cleanPath == "" || cleanPath == "." {
-		return false
-	}
-
-	if strings.Contains(cleanPath, "..") {
-		return false
-	}
-
-	absPath, err := filepath.Abs(cleanPath)
-	if err != nil {
-		return false
-	}
-
-	if isWindows() {
-		absPath = strings.ReplaceAll(absPath, "/", "\\")
-		absPath = strings.ToLower(absPath)
-	}
-
-	for _, allowed := range fm.allowedDirs {
-		allowedClean := filepath.Clean(allowed)
-		allowedAbs, err := filepath.Abs(allowedClean)
-		if err != nil {
-			continue
-		}
-		if isWindows() {
-			allowedAbs = strings.ReplaceAll(allowedAbs, "/", "\\")
-			allowedAbs = strings.ToLower(allowedAbs)
-		}
-
-		if strings.HasPrefix(absPath, allowedAbs) {
-			return true
-		}
-	}
-
-	return false
 }
 
 func (fm *FileManager) listDirectory(path string, requestID string) *FileOperationResult {
@@ -273,14 +266,6 @@ func (fm *FileManager) downloadFile(path string, requestID string) *FileOperatio
 }
 
 func (fm *FileManager) uploadFile(path string, contentB64 string, requestID string) *FileOperationResult {
-	if !fm.isPathAllowed(path) {
-		return &FileOperationResult{
-			Success:   false,
-			Error:     "access denied: path outside allowed directories",
-			RequestID: requestID,
-		}
-	}
-
 	data, err := base64.StdEncoding.DecodeString(contentB64)
 	if err != nil {
 		return &FileOperationResult{
@@ -323,14 +308,6 @@ func (fm *FileManager) uploadFile(path string, contentB64 string, requestID stri
 }
 
 func (fm *FileManager) deleteFile(path string, requestID string) *FileOperationResult {
-	if !fm.isPathAllowed(path) {
-		return &FileOperationResult{
-			Success:   false,
-			Error:     "access denied: cannot delete outside allowed directories",
-			RequestID: requestID,
-		}
-	}
-
 	info, err := os.Stat(path)
 	if err != nil {
 		return &FileOperationResult{
@@ -366,14 +343,6 @@ func (fm *FileManager) deleteFile(path string, requestID string) *FileOperationR
 }
 
 func (fm *FileManager) createDirectory(path string, requestID string) *FileOperationResult {
-	if !fm.isPathAllowed(path) {
-		return &FileOperationResult{
-			Success:   false,
-			Error:     "access denied: cannot create directory outside allowed directories",
-			RequestID: requestID,
-		}
-	}
-
 	if err := os.MkdirAll(path, 0755); err != nil {
 		return &FileOperationResult{
 			Success:   false,

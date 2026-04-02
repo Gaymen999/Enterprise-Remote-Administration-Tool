@@ -24,14 +24,15 @@ type Command struct {
 	CommandPayload string    `json:"command_payload"`
 	Status         string    `json:"status"`
 	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 type CommandResult struct {
-	ID         string    `json:"id"`
-	CommandID  string    `json:"command_id"`
-	StdOut     string    `json:"stdout"`
-	StdErr     string    `json:"stderr"`
-	ExitCode   int       `json:"exit_code"`
+	ID          string    `json:"id"`
+	CommandID   string    `json:"command_id"`
+	StdOut      string    `json:"stdout"`
+	StdErr      string    `json:"stderr"`
+	ExitCode    int       `json:"exit_code"`
 	CompletedAt time.Time `json:"completed_at"`
 }
 

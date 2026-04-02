@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"time"
@@ -24,7 +25,21 @@ func Load() (*Config, error) {
 
 	env := os.Getenv("ENV")
 	if env == "production" || env == "prod" {
-		validateRequiredEnvVars()
+		secrets, err := LoadProductionSecrets()
+		if err != nil {
+			log.Fatalf("[FATAL] Failed to load production secrets: %v", err)
+		}
+
+		return &Config{
+			DatabaseURL:           secrets.DatabaseURL,
+			JWTSecret:             secrets.JWTSecret,
+			AgentEnrollmentSecret: secrets.AgentEnrollmentSecret,
+			Port:                  getEnvOrDefault("PORT", "8080"),
+			JWTExpireHours:        24,
+			ReadTimeout:           15 * time.Second,
+			WriteTimeout:          15 * time.Second,
+			IdleTimeout:           60 * time.Second,
+		}, nil
 	}
 
 	dbURL := getEnvRequired("DB_URL")
@@ -46,19 +61,35 @@ func Load() (*Config, error) {
 	}, nil
 }
 
-func validateRequiredEnvVars() {
-	required := []string{"DB_URL", "JWT_SECRET", "AGENT_ENROLLMENT_SECRET"}
-	missing := []string{}
+type ProductionSecrets struct {
+	DatabaseURL           string
+	JWTSecret             string
+	AgentEnrollmentSecret string
+}
 
-	for _, key := range required {
-		if os.Getenv(key) == "" {
-			missing = append(missing, key)
-		}
+func LoadProductionSecrets() (*ProductionSecrets, error) {
+	vaultAddr := os.Getenv("VAULT_ADDR")
+	vaultToken := os.Getenv("VAULT_TOKEN")
+	secretsPath := os.Getenv("VAULT_SECRETS_PATH")
+
+	if vaultAddr == "" || vaultToken == "" || secretsPath == "" {
+		return nil, fmt.Errorf(" Vault configuration missing: VAULT_ADDR, VAULT_TOKEN, and VAULT_SECRETS_PATH must be set")
 	}
 
-	if len(missing) > 0 {
-		log.Fatalf("[FATAL] Missing required production environment variables: %v", missing)
+	secrets, err := fetchFromVault(vaultAddr, vaultToken, secretsPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch secrets from Vault: %w", err)
 	}
+
+	if secrets.JWTSecret == "" || secrets.AgentEnrollmentSecret == "" || secrets.DatabaseURL == "" {
+		return nil, fmt.Errorf("incomplete secrets retrieved from Vault: one or more required secrets are missing")
+	}
+
+	return secrets, nil
+}
+
+func fetchFromVault(addr, token, path string) (*ProductionSecrets, error) {
+	return nil, fmt.Errorf("Vault integration not implemented: please set DB_URL, JWT_SECRET, and AGENT_ENROLLMENT_SECRET environment variables directly")
 }
 
 func getEnvRequired(key string) string {

@@ -3,11 +3,13 @@ package ws
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/enterprise-rat/backend/internal/auth"
@@ -17,6 +19,18 @@ import (
 )
 
 var allowedOrigins = parseWsOrigins()
+
+type rateLimitEntry struct {
+	count     int
+	resetTime time.Time
+}
+
+var (
+	rateLimitMap    = make(map[string]*rateLimitEntry)
+	rateLimitMu     sync.Mutex
+	rateLimitMax    = 100
+	rateLimitWindow = 1 * time.Second
+)
 
 func parseWsOrigins() map[string]bool {
 	envOrigins := os.Getenv("CORS_ALLOWED_ORIGINS")
@@ -38,6 +52,30 @@ func parseWsOrigins() map[string]bool {
 
 func isProduction() bool {
 	return os.Getenv("ENV") == "production" || os.Getenv("ENV") == "prod"
+}
+
+func checkRateLimit(ip string) bool {
+	rateLimitMu.Lock()
+	defer rateLimitMu.Unlock()
+
+	now := time.Now()
+	entry, exists := rateLimitMap[ip]
+
+	if !exists || now.After(entry.resetTime) {
+		rateLimitMap[ip] = &rateLimitEntry{
+			count:     1,
+			resetTime: now.Add(rateLimitWindow),
+		}
+		return true
+	}
+
+	if entry.count >= rateLimitMax {
+		log.Printf("[WS] Rate limit exceeded for IP: %s", ip)
+		return false
+	}
+
+	entry.count++
+	return true
 }
 
 var upgrader = websocket.Upgrader{
@@ -77,6 +115,12 @@ func NewHandler(hub *Hub, jwtSecret string, pool *pgxpool.Pool) *Handler {
 }
 
 func (h *Handler) HandleWS(w http.ResponseWriter, r *http.Request) {
+	clientIP := r.RemoteAddr
+	if !checkRateLimit(clientIP) {
+		http.Error(w, `{"error": "rate limit exceeded"}`, http.StatusTooManyRequests)
+		return
+	}
+
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("[WS] Upgrade failed: %v", err)
@@ -93,6 +137,7 @@ func (h *Handler) HandleWS(w http.ResponseWriter, r *http.Request) {
 
 	client := NewClient(clientID, clientType, conn, h.hub)
 	h.hub.Register(client)
+	client.StartPump()
 
 	go client.writePump()
 	go h.readPump(client)
@@ -101,12 +146,12 @@ func (h *Handler) HandleWS(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) authenticate(r *http.Request) (ClientType, string, error) {
 	authHeader := r.Header.Get("Authorization")
 	if authHeader == "" {
-		return "", "", nil
+		return "", "", errors.New("missing authorization header")
 	}
 
 	parts := strings.SplitN(authHeader, " ", 2)
 	if len(parts) != 2 {
-		return "", "", nil
+		return "", "", errors.New("invalid authorization header format")
 	}
 
 	claims, err := auth.ValidateToken(parts[1], h.jwtSecret)

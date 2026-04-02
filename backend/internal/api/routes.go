@@ -111,14 +111,14 @@ func NewRouter(deps RouterDeps) http.Handler {
 	r.Use(corsMiddleware)
 	r.Use(secureHeaders)
 
-	loginRateLimiter := NewRateLimiter(5, 1*time.Minute)
+	loginRateLimiter := NewRateLimiter(3, 1*time.Minute)
 
 	r.Get("/health", healthHandler)
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Group(func(r chi.Router) {
 			r.Use(rateLimitMiddleware(loginRateLimiter))
-			r.Post("/auth/login", loginHandler(deps.DBPool, deps.JWTSecret, loginRateLimiter))
+			r.Post("/auth/login", loginHandler(deps.DBPool, deps.JWTSecret))
 			r.Post("/auth/refresh", refreshTokenHandler(deps.DBPool, deps.JWTSecret))
 			r.Post("/auth/logout", logoutHandler())
 			r.Post("/auth/register", registerHandler)
@@ -126,12 +126,19 @@ func NewRouter(deps RouterDeps) http.Handler {
 
 		r.Group(func(r chi.Router) {
 			r.Use(authMiddleware(deps.JWTSecret))
+			r.Use(auditMiddleware(deps.DBPool))
 
 			r.Get("/agents", listAgentsHandler(deps.DBPool))
 			r.Get("/agents/{id}", getAgentHandler(deps.DBPool))
 			r.Post("/commands", createCommandHandler(deps.DBPool, deps.Hub))
-			r.Get("/commands/{id}", getCommandHandler)
-			r.Get("/commands/{id}/result", getCommandResultHandler)
+			r.Get("/commands/{id}", getCommandHandler(deps.DBPool))
+			r.Get("/commands/{id}/result", getCommandResultHandler(deps.DBPool))
+
+			r.Post("/files/manage", fileManagerHandler(deps.Hub))
+			r.Get("/files/download/{agentId}", fileDownloadHandler(deps.Hub))
+			r.Post("/files/upload/{agentId}", fileUploadHandler(deps.Hub))
+
+			r.Get("/audit", GetAuditLogs(deps.DBPool))
 		})
 
 		r.Get("/ws", wsHandler(deps.Hub, deps.JWTSecret, deps.DBPool))
@@ -223,7 +230,8 @@ func RequireRole(allowedRoles ...string) func(http.Handler) http.Handler {
 
 func registerHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Write([]byte(`{"message": "register endpoint - to be implemented"}`))
+	w.WriteHeader(http.StatusNotImplemented)
+	json.NewEncoder(w).Encode(map[string]string{"error": "self-registration is disabled"})
 }
 
 type LoginRequest struct {
@@ -242,16 +250,9 @@ type UserResponse struct {
 	Role     string `json:"role"`
 }
 
-func loginHandler(pool *pgxpool.Pool, jwtSecret string, rateLimiter *RateLimiter) http.HandlerFunc {
+func loginHandler(pool *pgxpool.Pool, jwtSecret string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-
-		clientIP := getClientIP(r)
-		if !rateLimiter.Allow(clientIP) {
-			w.WriteHeader(http.StatusTooManyRequests)
-			json.NewEncoder(w).Encode(map[string]string{"error": "too many login attempts, please try again later"})
-			return
-		}
 
 		var req LoginRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -309,17 +310,53 @@ func loginHandler(pool *pgxpool.Pool, jwtSecret string, rateLimiter *RateLimiter
 }
 
 type RateLimiter struct {
-	requests map[string][]time.Time
-	mu       sync.RWMutex
-	limit    int
-	window   time.Duration
+	requests    map[string][]time.Time
+	mu          sync.RWMutex
+	limit       int
+	window      time.Duration
+	cleanupDone chan struct{}
 }
 
 func NewRateLimiter(limit int, window time.Duration) *RateLimiter {
-	return &RateLimiter{
-		requests: make(map[string][]time.Time),
-		limit:    limit,
-		window:   window,
+	rl := &RateLimiter{
+		requests:    make(map[string][]time.Time),
+		limit:       limit,
+		window:      window,
+		cleanupDone: make(chan struct{}),
+	}
+	go rl.cleanupOldEntries()
+	return rl
+}
+
+func (rl *RateLimiter) cleanupOldEntries() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer func() {
+		ticker.Stop()
+		close(rl.cleanupDone)
+	}()
+	for {
+		select {
+		case <-ticker.C:
+			rl.mu.Lock()
+			now := time.Now()
+			windowStart := now.Add(-rl.window)
+			for ip, times := range rl.requests {
+				var validTimes []time.Time
+				for _, t := range times {
+					if t.After(windowStart) {
+						validTimes = append(validTimes, t)
+					}
+				}
+				if len(validTimes) == 0 {
+					delete(rl.requests, ip)
+				} else {
+					rl.requests[ip] = validTimes
+				}
+			}
+			rl.mu.Unlock()
+		case <-rl.cleanupDone:
+			return
+		}
 	}
 }
 
@@ -359,15 +396,51 @@ func sanitizeInput(input string) string {
 
 func getClientIP(r *http.Request) string {
 	xff := r.Header.Get("X-Forwarded-For")
+	trustedProxies := []string{"127.0.0.1", "::1", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}
+
 	if xff != "" {
 		parts := strings.Split(xff, ",")
-		return strings.TrimSpace(parts[0])
+		firstIP := strings.TrimSpace(parts[0])
+		if isTrustedProxy(firstIP, trustedProxies) {
+			return firstIP
+		}
+		log.Printf("[SECURITY] Rejected spoofed X-Forwarded-For: %s", firstIP)
 	}
+
 	xri := r.Header.Get("X-Real-IP")
 	if xri != "" {
-		return xri
+		if isTrustedProxy(xri, trustedProxies) {
+			return xri
+		}
+		log.Printf("[SECURITY] Rejected spoofed X-Real-IP: %s", xri)
 	}
-	return r.RemoteAddr
+
+	host, _, _ := strings.Cut(r.RemoteAddr, ":")
+	return host
+}
+
+func isTrustedProxy(ip string, trusted []string) bool {
+	for _, trustedNet := range trusted {
+		if strings.HasSuffix(trustedNet, "/8") {
+			prefix := strings.TrimSuffix(trustedNet, "/8")
+			if strings.HasPrefix(ip, prefix+".") {
+				return true
+			}
+		} else if strings.HasSuffix(trustedNet, "/12") {
+			prefix := strings.TrimSuffix(trustedNet, "/12")
+			if strings.HasPrefix(ip, prefix+".") {
+				return true
+			}
+		} else if strings.HasSuffix(trustedNet, "/16") {
+			prefix := strings.TrimSuffix(trustedNet, "/16")
+			if strings.HasPrefix(ip, prefix+".") {
+				return true
+			}
+		} else if ip == trustedNet {
+			return true
+		}
+	}
+	return false
 }
 
 func setTokenCookie(w http.ResponseWriter, name, value string, maxAge int) {
@@ -481,7 +554,24 @@ func getAgentHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		agentID := chi.URLParam(r, "id")
-		w.Write([]byte(`{"agent_id": "` + agentID + `"}`))
+
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+
+		agent, err := db.GetAgentByID(ctx, pool, agentID)
+		if err != nil {
+			if err == db.ErrAgentNotFound {
+				w.WriteHeader(http.StatusNotFound)
+				json.NewEncoder(w).Encode(map[string]string{"error": "agent not found"})
+				return
+			}
+			log.Printf("[ERROR] Failed to fetch agent %s: %v", agentID, err)
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": "failed to fetch agent"})
+			return
+		}
+
+		json.NewEncoder(w).Encode(agent)
 	}
 }
 
@@ -548,14 +638,59 @@ func createCommandHandler(pool *pgxpool.Pool, hub *ws.Hub) http.HandlerFunc {
 	}
 }
 
-func getCommandHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	commandID := chi.URLParam(r, "id")
-	w.Write([]byte(`{"command_id": "` + commandID + `"}`))
+func getCommandHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		commandID := chi.URLParam(r, "id")
+
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+
+		command, err := db.GetCommandByID(ctx, pool, commandID)
+		if err != nil {
+			if err == db.ErrCommandNotFound {
+				w.WriteHeader(http.StatusNotFound)
+				json.NewEncoder(w).Encode(map[string]string{"error": "command not found"})
+				return
+			}
+			log.Printf("[ERROR] Failed to fetch command %s: %v", commandID, err)
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": "failed to fetch command"})
+			return
+		}
+
+		json.NewEncoder(w).Encode(command)
+	}
 }
 
-func getCommandResultHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	commandID := chi.URLParam(r, "id")
-	w.Write([]byte(`{"command_id": "` + commandID + `", "result": null}`))
+func getCommandResultHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		commandID := chi.URLParam(r, "id")
+
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+
+		result, err := db.GetCommandResult(ctx, pool, commandID)
+		if err != nil {
+			if err == db.ErrCommandNotFound {
+				w.WriteHeader(http.StatusNotFound)
+				json.NewEncoder(w).Encode(map[string]string{"error": "command not found"})
+				return
+			}
+			log.Printf("[ERROR] Failed to fetch command result for %s: %v", commandID, err)
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": "failed to fetch command result"})
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"command_id": result.CommandID,
+			"stdout":     result.Stdout,
+			"stderr":     result.Stderr,
+			"exit_code":  result.ExitCode,
+			"completed":  result.Completed,
+		})
+	}
 }

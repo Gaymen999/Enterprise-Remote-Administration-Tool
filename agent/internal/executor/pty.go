@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
+	"runtime"
 	"sync"
 
 	"github.com/enterprise-rat/agent/internal/models"
@@ -133,11 +133,20 @@ func (h *PtyHandler) createPtySession(sessionID, shell string, cols, rows int) (
 
 	session.ctx, session.cancel = context.WithCancel(context.Background())
 
+	var err error
 	if isWindows() {
-		return session, h.createWindowsSession(session, shell)
+		err = h.createWindowsSession(session, shell)
+	} else {
+		err = h.createUnixSession(session, shell)
 	}
 
-	return session, h.createUnixSession(session, shell)
+	if err != nil {
+		return nil, err
+	}
+
+	go h.streamOutput(session)
+
+	return session, nil
 }
 
 func (h *PtyHandler) createUnixSession(session *PtySession, shell string) error {
@@ -318,7 +327,7 @@ func (s *PtySession) GetOutputJSON() (string, bool) {
 }
 
 func isWindows() bool {
-	return os.PathSeparator == '\\'
+	return runtime.GOOS == "windows"
 }
 
 func getFloat64(m map[string]interface{}, key string, defaultVal float64) float64 {
@@ -333,6 +342,28 @@ type PtyOutputMessage struct {
 	SessionID string `json:"session_id"`
 	Data      string `json:"data,omitempty"`
 	Error     string `json:"error,omitempty"`
+}
+
+func (h *PtyHandler) streamOutput(session *PtySession) {
+	buf := make([]byte, 4096)
+	for {
+		select {
+		case <-session.ctx.Done():
+			return
+		default:
+			n, err := session.Stdout.Read(buf)
+			if n > 0 {
+				select {
+				case session.output <- buf[:n]:
+				case <-session.ctx.Done():
+					return
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	}
 }
 
 func (h *PtyHandler) PollSessionOutput(sessionID string) (string, bool) {

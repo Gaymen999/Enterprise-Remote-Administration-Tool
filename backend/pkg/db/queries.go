@@ -11,6 +11,7 @@ import (
 )
 
 var ErrUserNotFound = errors.New("user not found")
+var ErrCommandNotFound = errors.New("command not found")
 
 func GetAgents(ctx context.Context, pool *pgxpool.Pool) ([]models.Agent, error) {
 	rows, err := pool.Query(ctx, `
@@ -130,4 +131,39 @@ func sanitizeArgs(args []string) []string {
 		sanitized = append(sanitized, sanitizeCommandPayload(arg))
 	}
 	return sanitized
+}
+
+func GetCommandByID(ctx context.Context, pool *pgxpool.Pool, commandID string) (*models.Command, error) {
+	var command models.Command
+	var payloadJSON []byte
+	query := `SELECT id, agent_id, user_id, command_payload, status, created_at, updated_at FROM commands WHERE id = $1`
+	err := pool.QueryRow(ctx, query, commandID).Scan(
+		&command.ID, &command.AgentID, &command.UserID, &payloadJSON,
+		&command.Status, &command.CreatedAt, &command.UpdatedAt,
+	)
+	if err != nil {
+		return nil, ErrCommandNotFound
+	}
+	command.CommandPayload = string(payloadJSON)
+	return &command, nil
+}
+
+type CommandResult struct {
+	CommandID string
+	Stdout    string
+	Stderr    string
+	ExitCode  int
+	Completed *string
+}
+
+func GetCommandResult(ctx context.Context, pool *pgxpool.Pool, commandID string) (*CommandResult, error) {
+	var result CommandResult
+	query := `SELECT command_id, stdout, stderr, exit_code, completed_at FROM command_results WHERE command_id = $1`
+	err := pool.QueryRow(ctx, query, commandID).Scan(
+		&result.CommandID, &result.Stdout, &result.Stderr, &result.ExitCode, &result.Completed,
+	)
+	if err != nil {
+		return nil, ErrCommandNotFound
+	}
+	return &result, nil
 }

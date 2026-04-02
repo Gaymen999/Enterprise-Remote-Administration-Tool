@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { 
-  Search, Filter, Download, ChevronLeft, ChevronRight,
+  Search, Download, ChevronLeft, ChevronRight,
   Clock, User, Activity, AlertCircle, CheckCircle, XCircle
 } from 'lucide-react';
 import { api } from '../services/api';

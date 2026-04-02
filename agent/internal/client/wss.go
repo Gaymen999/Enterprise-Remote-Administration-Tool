@@ -1,9 +1,13 @@
 package client
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"io/ioutil"
 	"log"
 	"net/url"
+	"os"
 	"sync"
 	"time"
 
@@ -21,6 +25,32 @@ const (
 	reconnectDelay    = 5 * time.Second
 	maxReconnectDelay = 60 * time.Second
 )
+
+func getTLSConfig() *tls.Config {
+	tlsConfig := &tls.Config{
+		MinVersion:         tls.VersionTLS12,
+		Renegotiation:      tls.RenegotiateNever,
+		InsecureSkipVerify: false,
+	}
+
+	certPath := os.Getenv("AGENT_CERT_PATH")
+	if certPath != "" {
+		caCert, err := ioutil.ReadFile(certPath)
+		if err != nil {
+			log.Printf("[WSS] Failed to load CA cert: %v, falling back to system certs", err)
+			return tlsConfig
+		}
+		caPool := x509.NewCertPool()
+		if !caPool.AppendCertsFromPEM(caCert) {
+			log.Printf("[WSS] Failed to parse CA cert, using system certs")
+			return tlsConfig
+		}
+		tlsConfig.RootCAs = caPool
+		log.Printf("[WSS] Using custom CA cert from: %s", certPath)
+	}
+
+	return tlsConfig
+}
 
 type WSSClient struct {
 	serverURL        string
@@ -67,7 +97,15 @@ func (c *WSSClient) Connect() error {
 		header["Authorization"] = []string{"Bearer " + c.token}
 	}
 
-	conn, _, err := websocket.DefaultDialer.Dial(u.String(), header)
+	var conn *websocket.Conn
+	if u.Scheme == "wss" {
+		dialer := websocket.Dialer{
+			TLSClientConfig: getTLSConfig(),
+		}
+		conn, _, err = dialer.Dial(u.String(), header)
+	} else {
+		conn, _, err = websocket.DefaultDialer.Dial(u.String(), header)
+	}
 	if err != nil {
 		return err
 	}
@@ -360,8 +398,10 @@ func (c *WSSClient) Run() {
 			if retryCount > maxRetries {
 				log.Printf("[WSS] Max retries (%d) reached, continuing with unlimited retries", maxRetries)
 			}
-			log.Printf("[WSS] Connection failed (attempt %d): %v. Retrying in %v...", retryCount, err, reconnectDelay)
-			time.Sleep(reconnectDelay)
+			jitter := time.Duration(retryCount%10) * time.Second
+			sleepTime := reconnectDelay + jitter
+			log.Printf("[WSS] Connection failed (attempt %d): %v. Retrying in %v...", retryCount, err, sleepTime)
+			time.Sleep(sleepTime)
 			reconnectDelay = reconnectDelay * 2
 			if reconnectDelay > maxReconnectDelay {
 				reconnectDelay = maxReconnectDelay
@@ -369,7 +409,7 @@ func (c *WSSClient) Run() {
 		} else {
 			log.Println("[WSS] Connected successfully, keeping connection alive...")
 			retryCount = 0
-			reconnectDelay = reconnectDelay
+			reconnectDelay = 5 * time.Second
 			<-c.done
 			log.Println("[WSS] Connection ended, will reconnect...")
 			time.Sleep(1 * time.Second)

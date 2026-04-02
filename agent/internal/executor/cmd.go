@@ -7,6 +7,7 @@ import (
 	"io"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -14,27 +15,77 @@ import (
 )
 
 const (
-	maxOutputSize = 5 * 1024 * 1024
-	maxArgLength  = 1024
+	maxOutputSize  = 5 * 1024 * 1024
+	maxArgLength   = 1024
+	defaultTimeout = 60
+	maxTimeout     = 3600
 )
+
+var (
+	windowsExecutables = map[string]bool{
+		"ping":       true,
+		"ipconfig":   true,
+		"netstat":    true,
+		"tracert":    true,
+		"route":      true,
+		"arp":        true,
+		"nslookup":   true,
+		"hostname":   true,
+		"systeminfo": true,
+		"tasklist":   true,
+		"ver":        true,
+	}
+	linuxExecutables = map[string]bool{
+		"ping":       true,
+		"ifconfig":   true,
+		"netstat":    true,
+		"traceroute": true,
+		"route":      true,
+		"arp":        true,
+		"nslookup":   true,
+		"hostname":   true,
+		"uname":      true,
+		"ps":         true,
+		"ver":        true,
+		"ip":         true,
+		"iwconfig":   true,
+	}
+)
+
+func getAllowedExecutables() map[string]bool {
+	if runtime.GOOS == "windows" {
+		return windowsExecutables
+	}
+	return linuxExecutables
+}
 
 func ExecuteCommand(req *models.CommandRequest) *models.CommandResponse {
 	resp := &models.CommandResponse{
 		CommandID: req.CommandID,
 	}
 
-	if req.TimeoutSeconds <= 0 {
-		req.TimeoutSeconds = 60
+	if req.TimeoutSeconds <= 0 || req.TimeoutSeconds > maxTimeout {
+		req.TimeoutSeconds = defaultTimeout
 	}
 
-	if req.TimeoutSeconds > 3600 {
-		req.TimeoutSeconds = 3600
+	executable := strings.ToLower(filepath.Base(req.Executable))
+
+	if strings.Contains(req.Executable, "/") || strings.Contains(req.Executable, "\\") {
+		resp.ExitCode = -1
+		resp.ErrorMsg = "execution denied: path traversal not allowed"
+		return resp
 	}
 
-	executable := sanitizePath(req.Executable)
+	allowedExecutables := getAllowedExecutables()
+	if !allowedExecutables[executable] {
+		resp.ExitCode = -1
+		resp.ErrorMsg = "execution denied: executable not in allowlist"
+		return resp
+	}
+
 	sanitizedArgs := make([]string, 0, len(req.Args))
 	for _, arg := range req.Args {
-		arg = sanitizePath(arg)
+		arg = strings.TrimSpace(strings.ReplaceAll(arg, "\x00", ""))
 		if len(arg) > maxArgLength {
 			arg = arg[:maxArgLength]
 		}
@@ -52,7 +103,7 @@ func ExecuteCommand(req *models.CommandRequest) *models.CommandResponse {
 	stdoutBuf := newLimitedBuffer(maxOutputSize)
 	stderrBuf := newLimitedBuffer(maxOutputSize)
 
-	cmd := exec.CommandContext(ctx, executable, sanitizedArgs...)
+	cmd := exec.CommandContext(ctx, req.Executable, sanitizedArgs...)
 	cmd.Stdout = stdoutBuf
 	cmd.Stderr = stderrBuf
 
@@ -84,22 +135,6 @@ func ExecuteCommand(req *models.CommandRequest) *models.CommandResponse {
 	}
 
 	return resp
-}
-
-func sanitizePath(path string) string {
-	path = strings.TrimSpace(path)
-	path = strings.ReplaceAll(path, "\x00", "")
-
-	cleaned := filepath.Clean(path)
-	if cleaned == "." || cleaned == "" {
-		return ""
-	}
-
-	if strings.HasPrefix(cleaned, "..") {
-		return ""
-	}
-
-	return cleaned
 }
 
 type limitedBuffer struct {

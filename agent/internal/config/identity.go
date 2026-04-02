@@ -1,7 +1,9 @@
 package config
 
 import (
+	"crypto/rand"
 	"encoding/json"
+	"math/big"
 	"os"
 	"os/exec"
 	"runtime"
@@ -83,7 +85,8 @@ func randomString(n int) string {
 	const letters = "abcdefghijklmnopqrstuvwxyz0123456789"
 	b := make([]byte, n)
 	for i := range b {
-		b[i] = letters[i%len(letters)]
+		num, _ := rand.Int(rand.Reader, big.NewInt(int64(len(letters))))
+		b[i] = letters[num.Int64()]
 	}
 	return string(b)
 }

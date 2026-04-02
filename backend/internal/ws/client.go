@@ -24,37 +24,8 @@ func NewClient(id string, clientType ClientType, conn *websocket.Conn, hub *Hub)
 	}
 }
 
-func (c *Client) readPump() {
-	defer func() {
-		c.Hub.Unregister(c)
-		c.Conn.Close()
-	}()
-
-	c.Conn.SetReadLimit(maxMessageSize)
-	c.Conn.SetReadDeadline(time.Now().Add(pongWait))
-	c.Conn.SetPongHandler(func(string) error {
-		log.Printf("[WS] Pong received from %s %s, resetting deadline", c.Type, c.ID)
-		c.Conn.SetReadDeadline(time.Now().Add(pongWait))
-		return nil
-	})
-
-	log.Printf("[WS] readPump started for %s %s", c.Type, c.ID)
-
-	for {
-		_, message, err := c.Conn.ReadMessage()
-		if err != nil {
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("[WS] Read error for %s %s: %v", c.Type, c.ID, err)
-			} else {
-				log.Printf("[WS] Connection closed for %s %s: %v", c.Type, c.ID, err)
-			}
-			break
-		}
-
-		log.Printf("[WS] Message from %s %s: %s", c.Type, c.ID, message)
-	}
-
-	log.Printf("[WS] readPump ended for %s %s", c.Type, c.ID)
+func (c *Client) StartPump() {
+	go c.writePump()
 }
 
 func (c *Client) writePump() {

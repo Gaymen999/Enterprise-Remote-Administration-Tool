@@ -1,7 +1,7 @@
 import { useState, useCallback } from 'react';
 import { 
   Folder, File, FileText, Image, FileCode, Archive, 
-  ChevronRight, ChevronDown, Upload, Download, Trash2, 
+  ChevronRight, Upload, Download, Trash2, 
   FolderPlus, RefreshCw, Home, ArrowLeft, Eye, EyeOff
 } from 'lucide-react';
 import { api } from '../services/api';
@@ -15,20 +15,6 @@ interface FileItem {
   is_link: boolean;
 }
 
-interface FileOperationResult {
-  success: boolean;
-  data?: FileItem[] | FileDownloadData;
-  error?: string;
-  request_id: string;
-}
-
-interface FileDownloadData {
-  content: string;
-  size: number;
-  name: string;
-  original_path: string;
-}
-
 interface FileManagerProps {
   agentId: string;
 }
@@ -38,8 +24,6 @@ export function FileManager({ agentId }: FileManagerProps) {
   const [files, setFiles] = useState<FileItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [selectedFile, setSelectedFile] = useState<string | null>(null);
-  const [viewMode, setViewMode] = useState<'list' | 'grid'>('list');
   const [showHidden, setShowHidden] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
 
@@ -71,7 +55,6 @@ export function FileManager({ agentId }: FileManagerProps) {
 
   const navigateTo = useCallback((path: string) => {
     fetchDirectory(path);
-    setSelectedFile(null);
   }, [fetchDirectory]);
 
   const navigateUp = useCallback(() => {
@@ -84,8 +67,6 @@ export function FileManager({ agentId }: FileManagerProps) {
       navigateTo(currentPath.endsWith('/') || currentPath.endsWith('\\') 
         ? currentPath + file.name 
         : currentPath + '/' + file.name);
-    } else {
-      setSelectedFile(file.name);
     }
   };
 
@@ -161,7 +142,8 @@ export function FileManager({ agentId }: FileManagerProps) {
       await api.post(`/file/upload/${agentId}`, formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
         onUploadProgress: (progressEvent) => {
-          setUploadProgress(progressEvent.loaded / progressEvent.total * 100);
+          const total = progressEvent.total ?? progressEvent.loaded;
+          setUploadProgress((progressEvent.loaded / total) * 100);
         },
       });
       fetchDirectory(currentPath);

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -49,6 +50,9 @@ func auditMiddleware(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 					return
 				}
 
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+
 				username := "anonymous"
 				userID := ""
 				claimsVal := r.Context().Value(ClaimsContextKey)
@@ -81,7 +85,7 @@ func auditMiddleware(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 					CreatedAt: time.Now(),
 				}
 
-				if err := saveAuditLog(r.Context(), pool, entry); err != nil {
+				if err := saveAuditLog(ctx, pool, entry); err != nil {
 					log.Printf("[AUDIT] Failed to save audit log: %v", err)
 				}
 			}()
@@ -177,13 +181,15 @@ func GetAuditLogs(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if limit := r.URL.Query().Get("limit"); limit != "" {
-			if _, err := json.Number(limit).Int64(); err == nil {
-				filter.Limit = int(filter.Limit)
+			if parsed, err := strconv.Atoi(limit); err == nil && parsed > 0 {
+				filter.Limit = parsed
 			}
 		}
 
 		if offset := r.URL.Query().Get("offset"); offset != "" {
-			filter.Offset = 0
+			if parsed, err := strconv.Atoi(offset); err == nil && parsed >= 0 {
+				filter.Offset = parsed
+			}
 		}
 
 		filter.Action = r.URL.Query().Get("action")
@@ -226,28 +232,28 @@ func fetchAuditLogs(ctx context.Context, pool *pgxpool.Pool, filter AuditLogFilt
 	argNum := 1
 
 	if filter.UserID != "" {
-		query += " AND user_id = $" + string(rune('0'+argNum))
+		query += " AND user_id = $" + strconv.Itoa(argNum)
 		args = append(args, filter.UserID)
 		argNum++
 	}
 
 	if filter.Action != "" {
-		query += " AND action = $" + string(rune('0'+argNum))
+		query += " AND action = $" + strconv.Itoa(argNum)
 		args = append(args, filter.Action)
 		argNum++
 	}
 
 	if filter.ResourceType != "" {
-		query += " AND resource_type = $" + string(rune('0'+argNum))
+		query += " AND resource_type = $" + strconv.Itoa(argNum)
 		args = append(args, filter.ResourceType)
 		argNum++
 	}
 
-	query += " ORDER BY created_at DESC LIMIT $" + string(rune('0'+argNum))
+	query += " ORDER BY created_at DESC LIMIT $" + strconv.Itoa(argNum)
 	args = append(args, filter.Limit)
 	argNum++
 
-	query += " OFFSET $" + string(rune('0'+argNum))
+	query += " OFFSET $" + strconv.Itoa(argNum)
 	args = append(args, filter.Offset)
 
 	rows, err := pool.Query(ctx, query, args...)
@@ -258,28 +264,31 @@ func fetchAuditLogs(ctx context.Context, pool *pgxpool.Pool, filter AuditLogFilt
 
 	var logs []AuditLogEntry
 	for rows.Next() {
-		var log AuditLogEntry
+		var entry AuditLogEntry
 		var detailsJSON string
 		var ipAddress string
 
 		err := rows.Scan(
-			&log.ID,
-			&log.UserID,
-			&log.Action,
-			&log.ResourceType,
-			&log.ResourceID,
+			&entry.ID,
+			&entry.UserID,
+			&entry.Action,
+			&entry.ResourceType,
+			&entry.ResourceID,
 			&detailsJSON,
 			&ipAddress,
-			&log.CreatedAt,
+			&entry.CreatedAt,
 		)
 		if err != nil {
 			return nil, err
 		}
 
-		json.Unmarshal([]byte(detailsJSON), &log.Details)
-		log.IPAddress = ipAddress
+		if err := json.Unmarshal([]byte(detailsJSON), &entry.Details); err != nil {
+			log.Printf("[AUDIT] Failed to parse details JSON for log %s: %v", entry.ID, err)
+			entry.Details = map[string]interface{}{}
+		}
+		entry.IPAddress = ipAddress
 
-		logs = append(logs, log)
+		logs = append(logs, entry)
 	}
 
 	return logs, nil
