@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"context"
 	"log"
 	"sync"
 
@@ -35,9 +36,12 @@ type Hub struct {
 	unregister chan *Client
 	ptyManager *PtyManager
 	mu         sync.RWMutex
+	ctx        context.Context
+	cancel     context.CancelFunc
 }
 
 func NewHub() *Hub {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Hub{
 		clients:    make(map[*Client]bool),
 		agents:     make(map[string]*Client),
@@ -46,12 +50,23 @@ func NewHub() *Hub {
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
 		ptyManager: NewPtyManager(nil),
+		ctx:        ctx,
+		cancel:     cancel,
 	}
 }
 
 func (h *Hub) Run() {
+	defer func() {
+		h.cancel()
+		h.cleanupAllSessions()
+		log.Printf("[WS] Hub shutdown complete")
+	}()
+
 	for {
 		select {
+		case <-h.ctx.Done():
+			log.Printf("[WS] Hub received shutdown signal")
+			return
 		case client := <-h.register:
 			h.mu.Lock()
 			h.clients[client] = true
@@ -68,7 +83,9 @@ func (h *Hub) Run() {
 			h.mu.Lock()
 			if _, ok := h.clients[client]; ok {
 				delete(h.clients, client)
-				close(client.Send)
+				if client.Send != nil {
+					close(client.Send)
+				}
 				if client.Type == ClientTypeAgent {
 					delete(h.agents, client.ID)
 					log.Printf("[WS] Agent disconnected: %s (remaining: %d)", client.ID, len(h.agents))
@@ -92,6 +109,38 @@ func (h *Hub) Run() {
 			h.mu.RUnlock()
 		}
 	}
+}
+
+func (h *Hub) RunWithContext(ctx context.Context) {
+	go func() {
+		<-ctx.Done()
+		log.Printf("[WS] Hub context cancelled, initiating shutdown")
+		h.Shutdown()
+	}()
+	h.Run()
+}
+
+func (h *Hub) Shutdown() {
+	h.cancel()
+}
+
+func (h *Hub) cleanupAllSessions() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	for client := range h.clients {
+		if client.Send != nil {
+			close(client.Send)
+		}
+	}
+	h.clients = make(map[*Client]bool)
+	h.agents = make(map[string]*Client)
+	h.admins = make(map[string]*Client)
+
+	if h.ptyManager != nil {
+		h.ptyManager.Cleanup()
+	}
+	log.Printf("[WS] All client connections and PTY sessions cleaned up")
 }
 
 func (h *Hub) Register(client *Client) {

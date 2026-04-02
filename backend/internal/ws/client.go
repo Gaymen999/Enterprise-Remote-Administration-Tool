@@ -61,7 +61,9 @@ func (c *Client) writePump() {
 	ticker := time.NewTicker(pingPeriod)
 	defer func() {
 		ticker.Stop()
-		c.Conn.Close()
+		if c.Conn != nil {
+			c.Conn.Close()
+		}
 	}()
 
 	log.Printf("[WS] writePump started for %s %s", c.Type, c.ID)

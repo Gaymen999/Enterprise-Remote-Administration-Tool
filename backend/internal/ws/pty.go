@@ -35,12 +35,12 @@ func NewPtyManager(hub *Hub) *PtyManager {
 	}
 }
 
-func (pm *PtyManager) CreateSession(agentID, userID, sessionID string, cols, rows int) *PtySession {
+func (pm *PtyManager) CreateSession(agentID, userID, sessionID string, cols, rows int) (*PtySession, error) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
 	if len(pm.sessions) >= pm.maxSessions {
-		return nil
+		return nil, fmt.Errorf("maximum session limit reached (%d)", pm.maxSessions)
 	}
 
 	session := &PtySession{
@@ -52,7 +52,7 @@ func (pm *PtyManager) CreateSession(agentID, userID, sessionID string, cols, row
 	}
 
 	pm.sessions[sessionID] = session
-	return session
+	return session, nil
 }
 
 func (pm *PtyManager) GetSession(sessionID string) *PtySession {
@@ -88,6 +88,16 @@ func (pm *PtyManager) CloseSession(sessionID string) error {
 
 	delete(pm.sessions, sessionID)
 	return nil
+}
+
+func (pm *PtyManager) Cleanup() {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	for sessionID := range pm.sessions {
+		delete(pm.sessions, sessionID)
+	}
+	log.Printf("[PTY] All sessions cleaned up")
 }
 
 type PtyPayload struct {
@@ -137,7 +147,13 @@ func (h *Handler) handlePtyStart(client *Client, payload map[string]interface{})
 	rows := int(getFloat(payload, "rows", 24))
 	shell := getString(payload, "shell")
 
-	h.hub.ptyManager.CreateSession(client.ID, "", sessionID, cols, rows)
+	session, err := h.hub.ptyManager.CreateSession(client.ID, "", sessionID, cols, rows)
+	if err != nil {
+		log.Printf("[PTY] Failed to create session: %v", err)
+		h.sendPtyError(client, sessionID, err.Error())
+		return
+	}
+	_ = session
 
 	agentMsg := map[string]interface{}{
 		"type": "pty",
@@ -190,11 +206,19 @@ func (h *Handler) handlePtyResize(client *Client, payload map[string]interface{}
 	h.hub.SendToAgent(client.ID, msgBytes)
 }
 
+const maxPtyInputSize = 64 * 1024
+
 func (h *Handler) handlePtyInput(client *Client, payload map[string]interface{}) {
 	sessionID := getString(payload, "session_id")
 	data := getString(payload, "data")
 
 	if sessionID == "" || data == "" {
+		return
+	}
+
+	if len(data) > maxPtyInputSize {
+		log.Printf("[PTY] SECURITY: Dropped oversized PTY input from %s: %d bytes (max: %d)", client.ID, len(data), maxPtyInputSize)
+		h.sendPtyError(client, sessionID, "input payload too large (max 64KB)")
 		return
 	}
 

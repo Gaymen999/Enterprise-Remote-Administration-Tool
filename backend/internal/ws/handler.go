@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -15,16 +16,29 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-var allowedOrigins = map[string]bool{
-	"http://localhost:5173":  true,
-	"http://localhost:3000":  true,
-	"https://localhost:5173": true,
-	"https://localhost:3000": true,
+var allowedOrigins = parseWsOrigins()
+
+func parseWsOrigins() map[string]bool {
+	envOrigins := os.Getenv("CORS_ALLOWED_ORIGINS")
+	if envOrigins == "" {
+		return map[string]bool{}
+	}
+
+	origins := strings.Split(envOrigins, ",")
+	result := make(map[string]bool)
+	for _, o := range origins {
+		o = strings.TrimSpace(o)
+		if o != "" {
+			result[o] = true
+		}
+	}
+	log.Printf("[WS] Loaded %d allowed origins for WebSocket", len(result))
+	return result
 }
 
 var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
+	ReadBufferSize:  4096,
+	WriteBufferSize: 4096,
 	CheckOrigin: func(r *http.Request) bool {
 		origin := r.Header.Get("Origin")
 		if origin == "" {
@@ -107,8 +121,12 @@ func (h *Handler) readPump(client *Client) {
 		client.Conn.Close()
 	}()
 
-	const pongWait = 20 * time.Second
-	client.Conn.SetReadLimit(5120)
+	const (
+		pongWait       = 60 * time.Second
+		pingInterval   = 30 * time.Second
+		maxMessageSize = 4 * 1024 * 1024
+	)
+	client.Conn.SetReadLimit(maxMessageSize)
 	client.Conn.SetReadDeadline(time.Now().Add(pongWait))
 	client.Conn.SetPongHandler(func(string) error {
 		log.Printf("[WS] Pong received from %s %s", client.Type, client.ID)

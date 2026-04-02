@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +24,39 @@ type RouterDeps struct {
 	JWTSecret string
 	Hub       *ws.Hub
 	DBPool    *pgxpool.Pool
+}
+
+var corsAllowedOrigins = parseCorsOrigins()
+
+func parseCorsOrigins() []string {
+	envOrigins := os.Getenv("CORS_ALLOWED_ORIGINS")
+	if envOrigins == "" {
+		return []string{}
+	}
+
+	origins := strings.Split(envOrigins, ",")
+	result := make([]string, 0, len(origins))
+	for _, o := range origins {
+		o = strings.TrimSpace(o)
+		if o != "" {
+			result = append(result, o)
+		}
+	}
+	log.Printf("[CORS] Loaded %d allowed origins from environment", len(result))
+	return result
+}
+
+func isOriginAllowed(origin string) bool {
+	if origin == "" {
+		return false
+	}
+	for _, allowed := range corsAllowedOrigins {
+		if origin == allowed {
+			return true
+		}
+	}
+	log.Printf("[CORS] Origin not allowed: %s", origin)
+	return false
 }
 
 func NewRouter(deps RouterDeps) http.Handler {
@@ -62,27 +96,12 @@ func NewRouter(deps RouterDeps) http.Handler {
 	return r
 }
 
-var corsAllowedOrigins = []string{
-	"http://localhost:5173",
-	"http://localhost:3000",
-	"https://localhost:5173",
-	"https://localhost:3000",
-}
-
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
-		allowedOrigin := ""
 
-		for _, allowed := range corsAllowedOrigins {
-			if origin == allowed {
-				allowedOrigin = allowed
-				break
-			}
-		}
-
-		if allowedOrigin != "" {
-			w.Header().Set("Access-Control-Allow-Origin", allowedOrigin)
+		if isOriginAllowed(origin) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
@@ -239,7 +258,7 @@ func loginHandler(pool *pgxpool.Pool, jwtSecret string, rateLimiter *RateLimiter
 			return
 		}
 
-		tokenPair, err := auth.GenerateTokenPair(userID, sanitizedUsername, role, jwtSecret, 24)
+		tokenPair, err := auth.GenerateTokenPair(userID, sanitizedUsername, role, jwtSecret, 24, 168)
 		if err != nil {
 			log.Printf("[AUTH] Failed to generate token for user %s: %v", sanitizedUsername, err)
 			w.WriteHeader(http.StatusInternalServerError)
@@ -359,7 +378,7 @@ func refreshTokenHandler(pool *pgxpool.Pool, jwtSecret string) http.HandlerFunc 
 			return
 		}
 
-		tokenPair, err := auth.GenerateTokenPair(claims.UserID, claims.Username, claims.Role, jwtSecret, 24)
+		tokenPair, err := auth.GenerateTokenPair(claims.UserID, claims.Username, claims.Role, jwtSecret, 24, 168)
 		if err != nil {
 			log.Printf("[AUTH] Failed to generate new token pair: %v", err)
 			w.WriteHeader(http.StatusInternalServerError)

@@ -20,16 +20,14 @@ type TokenPair struct {
 	RefreshToken string `json:"refresh_token"`
 }
 
-func GenerateTokenPair(userID, username, role, secret string, expireHours int) (*TokenPair, error) {
-	accessToken, err := generateToken(userID, username, role, secret, time.Duration(expireHours)*time.Hour)
+func GenerateTokenPair(userID, username, role, secret string, accessExpireHours, refreshExpireHours int) (*TokenPair, error) {
+	accessToken, err := generateToken(userID, username, role, secret, time.Duration(accessExpireHours)*time.Hour)
 	if err != nil {
 		return nil, err
 	}
 
-	refreshExpiration := 24 * time.Hour
-	if refreshExpiration > 7*24*time.Hour {
-		refreshExpiration = 7 * 24 * time.Hour
-	}
+	validatedRefreshHours := validateRefreshHours(refreshExpireHours)
+	refreshExpiration := time.Duration(validatedRefreshHours) * time.Hour
 
 	refreshToken, err := generateToken(userID, username, role, secret, refreshExpiration)
 	if err != nil {
@@ -40,6 +38,16 @@ func GenerateTokenPair(userID, username, role, secret string, expireHours int) (
 		AccessToken:  accessToken,
 		RefreshToken: refreshToken,
 	}, nil
+}
+
+func validateRefreshHours(hours int) int {
+	if hours <= 0 {
+		return 168
+	}
+	if hours > 720 {
+		return 720
+	}
+	return hours
 }
 
 func generateToken(userID, username, role, secret string, expiration time.Duration) (string, error) {
