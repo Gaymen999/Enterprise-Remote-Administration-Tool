@@ -3,3 +3,11 @@ node_modules/
 backend/bin/
 dist/
 vendor/
+backend/.env
+backend/certs/ca.key
+agent/dist/
+Thumbs.db
+desktop.ini
+backend/certs/*.key
+agent/.agent_id
+*.log
