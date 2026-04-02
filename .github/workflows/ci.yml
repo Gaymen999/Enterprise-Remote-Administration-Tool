@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.22'
+
+    - name: Cache Go modules
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/go-build
+          ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-
+
+    - name: Download dependencies
+      working-directory: backend
+      run: go mod download
+
+    - name: Run go vet
+      working-directory: backend
+      run: go vet ./...
+
+    - name: Build backend
+      working-directory: backend
+      run: go build -v ./...
+
+    - name: Run tests
+      working-directory: backend
+      run: go test -v -race ./...
+
+  frontend:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: 'npm'
+        cache-dependency-path: frontend/package-lock.json
+
+    - name: Install dependencies
+      working-directory: frontend
+      run: npm ci
+
+    - name: Run ESLint
+      working-directory: frontend
+      run: npm run lint || true
+
+    - name: Build frontend
+      working-directory: frontend
+      run: npm run build
+
+  agent:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.22'
+
+    - name: Download dependencies
+      working-directory: agent
+      run: go mod download
+
+    - name: Build agent (Windows)
+      working-directory: agent
+      run: |
+        GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o dist/agent-windows-amd64.exe ./cmd/agent
+
+    - name: Build agent (Linux)
+      working-directory: agent
+      run: |
+        GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o dist/agent-linux-amd64 ./cmd/agent
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: agent-binaries
+        path: |
+          agent/dist/*.exe
+          agent/dist/agent-linux-amd64
+        retention-days: 7

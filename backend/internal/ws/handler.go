@@ -36,17 +36,27 @@ func parseWsOrigins() map[string]bool {
 	return result
 }
 
+func isProduction() bool {
+	return os.Getenv("ENV") == "production" || os.Getenv("ENV") == "prod"
+}
+
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  4096,
 	WriteBufferSize: 4096,
 	CheckOrigin: func(r *http.Request) bool {
 		origin := r.Header.Get("Origin")
+
 		if origin == "" {
+			if isProduction() {
+				log.Printf("[WS] SECURITY: Rejected request with empty origin in production")
+				return false
+			}
 			return true
 		}
+
 		allowed := allowedOrigins[origin]
 		if !allowed {
-			log.Printf("[WS] Blocked cross-origin WebSocket from: %s", origin)
+			log.Printf("[WS] SECURITY: Blocked cross-origin WebSocket from: %s", origin)
 		}
 		return allowed
 	},

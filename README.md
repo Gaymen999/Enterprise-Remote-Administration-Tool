@@ -171,7 +171,10 @@ RAT_AGENT_TOKEN=<optional-jwt-token>
 - **JWT Authentication**: Short-lived access tokens with secure refresh
 - **RBAC**: Role-based access control (admin, viewer)
 - **mTLS Ready**: X.509 certificate authentication support
-- **Audit Logging**: All actions logged with user context
+- **Audit Logging**: Comprehensive logging of all actions
+- **Two-Factor Authentication (2FA)**: TOTP-based MFA support
+- **Rate Limiting**: IP-based brute-force protection
+- **Structured Logging**: JSON-formatted logs via slog
 
 ## Security Improvements (v2.0)
 
