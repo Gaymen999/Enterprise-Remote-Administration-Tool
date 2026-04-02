@@ -4,12 +4,13 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+
+	"golang.org/x/crypto/argon2"
 )
 
 type EncryptedPayload struct {
@@ -22,6 +23,22 @@ type AESGCMEncryptor struct {
 	key []byte
 }
 
+type Argon2Params struct {
+	Time    uint32
+	Memory  uint32
+	Threads uint8
+	KeyLen  uint32
+	SaltLen uint32
+}
+
+var DefaultArgon2Params = Argon2Params{
+	Time:    2,
+	Memory:  64 * 1024,
+	Threads: 4,
+	KeyLen:  32,
+	SaltLen: 16,
+}
+
 func NewAESGCMEncryptor(key []byte) (*AESGCMEncryptor, error) {
 	if len(key) != 32 {
 		return nil, errors.New("key must be 32 bytes (256 bits)")
@@ -30,15 +47,19 @@ func NewAESGCMEncryptor(key []byte) (*AESGCMEncryptor, error) {
 }
 
 func NewAESGCMEncryptorFromPassword(password string, salt []byte) (*AESGCMEncryptor, error) {
-	key := deriveKey(password, salt)
+	key := deriveKeyArgon2(password, salt, DefaultArgon2Params)
 	return NewAESGCMEncryptor(key)
 }
 
-func deriveKey(password string, salt []byte) []byte {
-	h := sha256.New()
-	h.Write([]byte(password))
-	h.Write(salt)
-	return h.Sum(nil)
+func deriveKeyArgon2(password string, salt []byte, params Argon2Params) []byte {
+	return argon2.IDKey(
+		[]byte(password),
+		salt,
+		params.Time,
+		params.Memory,
+		params.Threads,
+		params.KeyLen,
+	)
 }
 
 func (e *AESGCMEncryptor) Encrypt(plaintext []byte) (*EncryptedPayload, error) {

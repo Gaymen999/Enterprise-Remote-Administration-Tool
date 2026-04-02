@@ -69,7 +69,7 @@ func generateToken(userID, username, role, secret string, expiration time.Durati
 func ValidateToken(tokenString, secret string) (*Claims, error) {
 	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+			return nil, fmt.Errorf("invalid signing method: %s (only HS256 allowed)", token.Header["alg"])
 		}
 		return []byte(secret), nil
 	})
@@ -80,7 +80,7 @@ func ValidateToken(tokenString, secret string) (*Claims, error) {
 
 	claims, ok := token.Claims.(*Claims)
 	if !ok || !token.Valid {
-		return nil, errors.New("invalid token")
+		return nil, errors.New("invalid or expired token")
 	}
 
 	return claims, nil

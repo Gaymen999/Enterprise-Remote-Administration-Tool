@@ -4,8 +4,20 @@ import { Terminal as XTerm } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
 import { WebLinksAddon } from 'xterm-addon-web-links';
 import { SearchAddon } from 'xterm-addon-search';
+import DOMPurify from 'dompurify';
 import 'xterm/css/xterm.css';
 import { getWebSocketUrl } from '../services/api';
+
+const escapeXterm = (str: string): string => {
+  return DOMPurify.sanitize(str, { 
+    ALLOWED_TAGS: [],
+    ALLOWED_ATTR: []
+  });
+};
+
+const writeEscaped = (term: XTerm, data: string) => {
+  term.write(escapeXterm(data));
+};
 
 interface PtyMessage {
   type: string;
@@ -145,33 +157,33 @@ export function Terminal() {
           case 'pty_started':
             sessionIdRef.current = msg.payload?.session_id || null;
             setSessionActive(true);
-            term.write('\x1b[32m[PTY]\x1b[0m PTY session started.\r\n\r\n');
+            writeEscaped(term, '\x1b[32m[PTY]\x1b[0m PTY session started.\r\n\r\n');
             break;
 
           case 'pty_output':
             if (msg.payload?.data) {
-              term.write(msg.payload.data);
+              writeEscaped(term, msg.payload.data);
             }
             break;
 
           case 'pty_error':
-            term.write(`\r\n\x1b[31m[PTY ERROR]\x1b[0m ${msg.payload?.error || 'Unknown error'}\r\n`);
+            writeEscaped(term, `\r\n\x1b[31m[PTY ERROR]\x1b[0m ${msg.payload?.error || 'Unknown error'}\r\n`);
             break;
 
           case 'pty_stopped':
-            term.write('\r\n\x1b[33m[PTY]\x1b[0m PTY session ended.\r\n');
+            writeEscaped(term, '\r\n\x1b[33m[PTY]\x1b[0m PTY session ended.\r\n');
             setSessionActive(false);
             break;
 
           case 'command_result':
             if (msg.payload?.data) {
-              term.write(`\r\n${msg.payload.data}\r\n`);
+              writeEscaped(term, `\r\n${msg.payload.data}\r\n`);
             }
             break;
 
           default:
             if (msg.type === 'error') {
-              term.write(`\r\n\x1b[31m[ERROR]\x1b[0m ${msg.payload?.error || 'Unknown error'}\r\n`);
+              writeEscaped(term, `\r\n\x1b[31m[ERROR]\x1b[0m ${msg.payload?.error || 'Unknown error'}\r\n`);
             }
         }
       } catch (err) {

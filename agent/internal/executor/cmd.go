@@ -17,7 +17,7 @@ func ExecuteCommand(req *models.CommandRequest) *models.CommandResponse {
 	}
 
 	if req.TimeoutSeconds <= 0 {
-		req.TimeoutSeconds = 300
+		req.TimeoutSeconds = 60
 	}
 
 	if req.TimeoutSeconds > 3600 {
@@ -30,12 +30,13 @@ func ExecuteCommand(req *models.CommandRequest) *models.CommandResponse {
 		sanitizedArgs = append(sanitizedArgs, sanitizePath(arg))
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(req.TimeoutSeconds)*time.Second)
+	timeout := time.Duration(req.TimeoutSeconds) * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	var stdout, stderr bytes.Buffer
 
-	cmd := exec.Command(executable, sanitizedArgs...)
+	cmd := exec.CommandContext(ctx, executable, sanitizedArgs...)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
@@ -45,6 +46,9 @@ func ExecuteCommand(req *models.CommandRequest) *models.CommandResponse {
 	resp.StdErr = strings.TrimSpace(stderr.String())
 
 	if ctx.Err() == context.DeadlineExceeded {
+		if cmd.Process != nil {
+			cmd.Process.Kill()
+		}
 		resp.ExitCode = -1
 		resp.ErrorMsg = "command timed out"
 		return resp

@@ -91,22 +91,36 @@ func (fm *FileManager) HandleFileOperation(payload map[string]interface{}) *File
 func (fm *FileManager) isPathAllowed(path string) bool {
 	cleanPath := filepath.Clean(path)
 
+	if cleanPath == "" || cleanPath == "." {
+		return false
+	}
+
 	if strings.Contains(cleanPath, "..") {
 		return false
 	}
 
+	absPath, err := filepath.Abs(cleanPath)
+	if err != nil {
+		return false
+	}
+
 	if isWindows() {
-		cleanPath = strings.ReplaceAll(cleanPath, "/", "\\")
-		cleanPath = strings.ToLower(cleanPath)
+		absPath = strings.ReplaceAll(absPath, "/", "\\")
+		absPath = strings.ToLower(absPath)
 	}
 
 	for _, allowed := range fm.allowedDirs {
 		allowedClean := filepath.Clean(allowed)
+		allowedAbs, err := filepath.Abs(allowedClean)
+		if err != nil {
+			continue
+		}
 		if isWindows() {
-			allowedClean = strings.ToLower(allowedClean)
+			allowedAbs = strings.ReplaceAll(allowedAbs, "/", "\\")
+			allowedAbs = strings.ToLower(allowedAbs)
 		}
 
-		if strings.HasPrefix(cleanPath, allowedClean) {
+		if strings.HasPrefix(absPath, allowedAbs) {
 			return true
 		}
 	}
