@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/enterprise-rat/backend/internal/api/middleware"
 	"github.com/enterprise-rat/backend/internal/auth"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -45,27 +46,35 @@ func auditMiddleware(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 			wrapper := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 			next.ServeHTTP(wrapper, r)
 
+			// Extract claims and other info before starting the goroutine
+			// to avoid race conditions and context cancellation issues.
+			username := "anonymous"
+			userID := ""
+			claimsVal := r.Context().Value(middleware.ClaimsContextKey)
+			if claimsVal != nil {
+				if claims, ok := claimsVal.(*auth.Claims); ok {
+					username = claims.Username
+					userID = claims.UserID
+				}
+			}
+
+			method := r.Method
+			path := r.URL.Path
+			query := r.URL.RawQuery
+			userAgent := r.UserAgent()
+			clientIP := getClientIP(r)
+			resourceID := chi.URLParam(r, "id")
+
 			go func() {
-				if shouldSkipAudit(r.URL.Path) {
+				if shouldSkipAudit(path) {
 					return
 				}
 
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
 
-				username := "anonymous"
-				userID := ""
-				claimsVal := r.Context().Value(ClaimsContextKey)
-				if claimsVal != nil {
-					if claims, ok := claimsVal.(*auth.Claims); ok {
-						username = claims.Username
-						userID = claims.UserID
-					}
-				}
-
-				action := determineAction(r.Method, r.URL.Path)
-				resourceType := determineResourceType(r.URL.Path)
-				resourceID := chi.URLParam(r, "id")
+				action := determineAction(method, path)
+				resourceType := determineResourceType(path)
 
 				entry := AuditLogEntry{
 					UserID:       userID,
@@ -74,14 +83,14 @@ func auditMiddleware(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 					ResourceType: resourceType,
 					ResourceID:   resourceID,
 					Details: map[string]interface{}{
-						"method":      r.Method,
-						"path":        r.URL.Path,
+						"method":      method,
+						"path":        path,
 						"status_code": wrapper.statusCode,
 						"duration_ms": time.Since(start).Milliseconds(),
-						"query":       r.URL.RawQuery,
+						"query":       query,
 					},
-					IPAddress: getClientIP(r),
-					UserAgent: r.UserAgent(),
+					IPAddress: clientIP,
+					UserAgent: userAgent,
 					CreatedAt: time.Now(),
 				}
 
@@ -133,8 +142,8 @@ func determineResourceType(path string) string {
 	parts := strings.Split(path, "/")
 	if len(parts) > 0 {
 		resource := strings.TrimSuffix(parts[0], "s")
-		if resource == "ag" {
-			return "agent"
+		if resource == "agent" || resource == "command" || resource == "file" || resource == "audit" {
+			return resource
 		}
 		return resource
 	}

@@ -11,7 +11,7 @@ start "Frontend Dev" cmd /k "cd frontend && npm install && npm run dev"
 
 timeout /t 5 /nobreak >nul
 
-start "Agent (Demo)" cmd /k "cd agent && go run cmd/agent/main.go"
+start "Agent (Demo)" cmd /k "cd agent && set RAT_SERVER_URL=ws://localhost:8080/api/v1/ws && set AGENT_ENROLLMENT_SECRET=dev-secret-123 && go run cmd/agent/main.go"
 
 echo.
 echo All services started!

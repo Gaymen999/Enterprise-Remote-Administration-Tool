@@ -20,3 +20,4 @@ backend/certs/*.key
 *.crt
 *.key
 .DS_Store
+to_do_list.md

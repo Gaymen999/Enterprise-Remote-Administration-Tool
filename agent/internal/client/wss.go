@@ -131,8 +131,35 @@ func (c *WSSClient) Connect() error {
 
 	go c.readPump()
 	go c.writePump()
+	go c.ptyOutputPump()
 
 	return nil
+}
+
+func (c *WSSClient) ptyOutputPump() {
+	log.Println("[WSS] ptyOutputPump started")
+	for {
+		select {
+		case <-c.done:
+			log.Println("[WSS] ptyOutputPump stopping")
+			return
+		case output := <-c.ptyHandler.OutputChan:
+			msg := map[string]interface{}{
+				"type": "pty_output",
+				"payload": map[string]interface{}{
+					"session_id": output.SessionID,
+					"data":       string(output.Data),
+				},
+			}
+			c.mu.Lock()
+			if c.conn != nil {
+				if err := c.conn.WriteJSON(msg); err != nil {
+					log.Printf("[PTY] Failed to send PTY output: %v", err)
+				}
+			}
+			c.mu.Unlock()
+		}
+	}
 }
 
 func (c *WSSClient) sendHandshake() error {
@@ -250,29 +277,17 @@ func (c *WSSClient) handlePty(msg map[string]interface{}) {
 
 	resp, shouldSend := c.ptyHandler.HandlePtyCommand(payload)
 	if resp != nil && shouldSend {
-		c.sendPtyResponse(resp, payload)
-	}
-}
+		c.mu.Lock()
+		defer c.mu.Unlock()
 
-func (c *WSSClient) sendPtyResponse(resp *models.CommandResponse, payload map[string]interface{}) {
-	sessionID, _ := payload["session_id"].(string)
-
-	output, _ := c.ptyHandler.PollSessionOutput(sessionID)
-
-	msg := map[string]interface{}{
-		"type": "pty_output",
-		"payload": map[string]interface{}{
-			"session_id": sessionID,
-			"data":       output,
-		},
-	}
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.conn != nil {
-		if err := c.conn.WriteJSON(msg); err != nil {
-			log.Printf("[PTY] Failed to send PTY output: %v", err)
+		if c.conn != nil {
+			response := map[string]interface{}{
+				"type":    "pty_response", // Changed to differentiate from output
+				"payload": resp,
+			}
+			if err := c.conn.WriteJSON(response); err != nil {
+				log.Printf("[PTY] Failed to send response: %v", err)
+			}
 		}
 	}
 }

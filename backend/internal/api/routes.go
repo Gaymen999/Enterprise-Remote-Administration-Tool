@@ -10,12 +10,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/enterprise-rat/backend/internal/api/middleware"
 	"github.com/enterprise-rat/backend/internal/auth"
 	"github.com/enterprise-rat/backend/internal/models"
 	"github.com/enterprise-rat/backend/internal/ws"
 	"github.com/enterprise-rat/backend/pkg/db"
 	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
+	chiMiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -104,10 +105,10 @@ func secureHeaders(next http.Handler) http.Handler {
 func NewRouter(deps RouterDeps) http.Handler {
 	r := chi.NewRouter()
 
-	r.Use(middleware.Recoverer)
-	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
-	r.Use(middleware.Timeout(30 * time.Second))
+	r.Use(chiMiddleware.Recoverer)
+	r.Use(chiMiddleware.RequestID)
+	r.Use(chiMiddleware.RealIP)
+	r.Use(chiMiddleware.Timeout(30 * time.Second))
 	r.Use(corsMiddleware)
 	r.Use(secureHeaders)
 
@@ -125,7 +126,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 		})
 
 		r.Group(func(r chi.Router) {
-			r.Use(authMiddleware(deps.JWTSecret))
+			r.Use(middleware.AuthMiddleware(deps.JWTSecret))
 			r.Use(auditMiddleware(deps.DBPool))
 
 			r.Get("/agents", listAgentsHandler(deps.DBPool))
@@ -155,77 +156,6 @@ func wsHandler(hub *ws.Hub, jwtSecret string, pool *pgxpool.Pool) http.HandlerFu
 func healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte(`{"status": "ok"}`))
-}
-
-func authMiddleware(secret string) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			authHeader := r.Header.Get("Authorization")
-			if authHeader == "" {
-				cookie, err := r.Cookie("access_token")
-				if err != nil {
-					http.Error(w, `{"error": "missing authorization"}`, http.StatusUnauthorized)
-					return
-				}
-				authHeader = "Bearer " + cookie.Value
-			}
-
-			parts := strings.SplitN(authHeader, " ", 2)
-			if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
-				http.Error(w, `{"error": "invalid authorization header format"}`, http.StatusUnauthorized)
-				return
-			}
-
-			claims, err := auth.ValidateToken(parts[1], secret)
-			if err != nil {
-				log.Printf("[AUTH] Invalid token: %v", err)
-				http.Error(w, `{"error": "invalid or expired token"}`, http.StatusUnauthorized)
-				return
-			}
-
-			ctx := context.WithValue(r.Context(), ClaimsContextKey, claims)
-			log.Printf("[AUTH] Protected route accessed by %s (%s): %s %s", claims.Username, claims.Role, r.Method, r.URL.Path)
-			next.ServeHTTP(w, r.WithContext(ctx))
-		})
-	}
-}
-
-type contextKey string
-
-const ClaimsContextKey contextKey = "claims"
-
-func RequireRole(allowedRoles ...string) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			claimsVal := r.Context().Value(ClaimsContextKey)
-			if claimsVal == nil {
-				http.Error(w, `{"error": "unauthorized"}`, http.StatusUnauthorized)
-				return
-			}
-
-			claims, ok := claimsVal.(*auth.Claims)
-			if !ok {
-				http.Error(w, `{"error": "invalid claims"}`, http.StatusInternalServerError)
-				return
-			}
-
-			roleAllowed := false
-			for _, role := range allowedRoles {
-				if claims.Role == role {
-					roleAllowed = true
-					break
-				}
-			}
-
-			if !roleAllowed {
-				log.Printf("[AUTH] Access denied for user %s with role %s", claims.Username, claims.Role)
-				http.Error(w, `{"error": "insufficient permissions"}`, http.StatusForbidden)
-				return
-			}
-
-			next.ServeHTTP(w, r)
-		})
-	}
 }
 
 func registerHandler(w http.ResponseWriter, r *http.Request) {
@@ -602,10 +532,12 @@ func createCommandHandler(pool *pgxpool.Pool, hub *ws.Hub) http.HandlerFunc {
 			req.Timeout = 300
 		}
 
+		userID := middleware.GetUserID(r.Context())
+
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		defer cancel()
 
-		commandID, err := db.CreateCommand(ctx, pool, req.AgentID, req.Executable, req.Args, req.Timeout)
+		commandID, err := db.CreateCommand(ctx, pool, req.AgentID, userID, req.Executable, req.Args, req.Timeout)
 		if err != nil {
 			log.Printf("[CMD] Failed to create command: %v", err)
 			w.WriteHeader(http.StatusInternalServerError)

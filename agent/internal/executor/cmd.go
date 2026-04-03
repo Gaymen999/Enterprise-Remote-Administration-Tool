@@ -152,18 +152,19 @@ func newLimitedBuffer(limit int) *limitedBuffer {
 
 func (l *limitedBuffer) Write(p []byte) (n int, err error) {
 	if l.truncated {
-		return 0, io.EOF
+		return 0, nil // Silently drop after first truncation
 	}
 
 	remaining := l.limit - l.buf.Len()
 	if remaining <= 0 {
 		l.truncated = true
-		return 0, io.EOF
+		return 0, nil
 	}
 
 	if len(p) > remaining {
-		p = p[:remaining]
+		n, err = l.buf.Write(p[:remaining])
 		l.truncated = true
+		return n, io.ErrShortWrite
 	}
 
 	return l.buf.Write(p)

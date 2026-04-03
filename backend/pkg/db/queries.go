@@ -89,7 +89,7 @@ func SaveCommandResult(ctx context.Context, pool *pgxpool.Pool, commandID, stdou
 	return err
 }
 
-func CreateCommand(ctx context.Context, pool *pgxpool.Pool, agentID, executable string, args []string, timeout int) (string, error) {
+func CreateCommand(ctx context.Context, pool *pgxpool.Pool, agentID, userID, executable string, args []string, timeout int) (string, error) {
 	commandPayload := map[string]interface{}{
 		"executable": sanitizeCommandPayload(executable),
 		"args":       sanitizeArgs(args),
@@ -103,9 +103,9 @@ func CreateCommand(ctx context.Context, pool *pgxpool.Pool, agentID, executable 
 	var commandID string
 	err = pool.QueryRow(ctx, `
 		INSERT INTO commands (id, agent_id, user_id, command_payload, status, created_at, updated_at)
-		VALUES (gen_random_uuid()::uuid, $1, 'system', $2, 'pending', NOW(), NOW())
+		VALUES (gen_random_uuid()::uuid, $1, $2, $3, 'pending', NOW(), NOW())
 		RETURNING id
-	`, agentID, string(payloadJSON)).Scan(&commandID)
+	`, agentID, userID, string(payloadJSON)).Scan(&commandID)
 
 	if err != nil {
 		return "", err

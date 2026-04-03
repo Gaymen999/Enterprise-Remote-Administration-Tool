@@ -47,7 +47,11 @@ func NewAESGCMEncryptor(key []byte) (*AESGCMEncryptor, error) {
 }
 
 func NewAESGCMEncryptorFromPassword(password string, salt []byte) (*AESGCMEncryptor, error) {
-	key := deriveKeyArgon2(password, salt, DefaultArgon2Params)
+	params := DefaultArgon2Params
+	if salt != nil && uint32(len(salt)) < params.SaltLen {
+		return nil, fmt.Errorf("salt too short: expected at least %d bytes", params.SaltLen)
+	}
+	key := deriveKeyArgon2(password, salt, params)
 	return NewAESGCMEncryptor(key)
 }
 

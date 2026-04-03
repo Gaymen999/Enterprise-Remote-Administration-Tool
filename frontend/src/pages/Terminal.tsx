@@ -4,19 +4,11 @@ import { Terminal as XTerm } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
 import { WebLinksAddon } from 'xterm-addon-web-links';
 import { SearchAddon } from 'xterm-addon-search';
-import DOMPurify from 'dompurify';
 import 'xterm/css/xterm.css';
 import { getWebSocketUrl } from '../services/api';
 
-const escapeXterm = (str: string): string => {
-  return DOMPurify.sanitize(str, { 
-    ALLOWED_TAGS: [],
-    ALLOWED_ATTR: []
-  });
-};
-
 const writeEscaped = (term: XTerm, data: string) => {
-  term.write(escapeXterm(data));
+  term.write(data);
 };
 
 interface PtyMessage {
@@ -58,6 +50,7 @@ export function Terminal() {
     xtermRef.current.write('\x1b[36m[PTY]\x1b[0m Starting PTY session...\r\n');
 
     sendPtyMessage('start', {
+      agent_id: agentId,
       session_id: sessionIdRef.current || undefined,
       cols,
       rows,

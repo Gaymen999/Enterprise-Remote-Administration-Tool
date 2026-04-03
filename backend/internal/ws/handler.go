@@ -139,14 +139,21 @@ func (h *Handler) HandleWS(w http.ResponseWriter, r *http.Request) {
 	h.hub.Register(client)
 	client.StartPump()
 
-	go client.writePump()
 	go h.readPump(client)
 }
 
 func (h *Handler) authenticate(r *http.Request) (ClientType, string, error) {
 	authHeader := r.Header.Get("Authorization")
 	if authHeader == "" {
-		return "", "", errors.New("missing authorization header")
+		// Browser WebSocket connections often don't support custom headers,
+		// so we check for the access_token cookie.
+		if cookie, err := r.Cookie("access_token"); err == nil {
+			authHeader = "Bearer " + cookie.Value
+		}
+	}
+
+	if authHeader == "" {
+		return "", "", errors.New("missing authorization")
 	}
 
 	parts := strings.SplitN(authHeader, " ", 2)

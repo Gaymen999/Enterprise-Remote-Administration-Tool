@@ -114,40 +114,25 @@ type PtyMessage struct {
 	Payload PtyPayload `json:"payload"`
 }
 
-func (h *Handler) handlePtyMessage(client *Client, msg WSSMessage) {
-	payload := msg.Payload
-
-	ptyType := getString(payload, "pty_type")
-	if ptyType == "" {
-		log.Printf("[PTY] Missing pty_type in message")
-		return
-	}
-
-	switch ptyType {
-	case "start":
-		h.handlePtyStart(client, payload)
-	case "resize":
-		h.handlePtyResize(client, payload)
-	case "input":
-		h.handlePtyInput(client, payload)
-	case "stop":
-		h.handlePtyStop(client, payload)
-	default:
-		log.Printf("[PTY] Unknown PTY type: %s", ptyType)
-	}
-}
-
 func (h *Handler) handlePtyStart(client *Client, payload map[string]interface{}) {
 	sessionID := getString(payload, "session_id")
+	agentID := getString(payload, "agent_id")
 	if sessionID == "" {
 		sessionID = generateSecureID()
+	}
+
+	if agentID == "" {
+		log.Printf("[PTY] Missing agent_id in start request from %s", client.ID)
+		h.sendPtyError(client, sessionID, "agent_id is required")
+		return
 	}
 
 	cols := int(getFloat(payload, "cols", 80))
 	rows := int(getFloat(payload, "rows", 24))
 	shell := getString(payload, "shell")
 
-	session, err := h.hub.ptyManager.CreateSession(client.ID, "", sessionID, cols, rows)
+	// Store UserID so we know where to send output back to
+	session, err := h.hub.ptyManager.CreateSession(agentID, client.ID, sessionID, cols, rows)
 	if err != nil {
 		log.Printf("[PTY] Failed to create session: %v", err)
 		h.sendPtyError(client, sessionID, err.Error())
@@ -167,14 +152,14 @@ func (h *Handler) handlePtyStart(client *Client, payload map[string]interface{})
 	}
 
 	msgBytes, _ := json.Marshal(agentMsg)
-	if !h.hub.SendToAgent(client.ID, msgBytes) {
+	if !h.hub.SendToAgent(agentID, msgBytes) {
 		h.sendPtyError(client, sessionID, "agent not connected")
 		h.hub.ptyManager.RemoveSession(sessionID)
 		return
 	}
 
 	h.sendPtyStarted(client, sessionID)
-	log.Printf("[PTY] Session %s started for agent %s", sessionID, client.ID)
+	log.Printf("[PTY] Session %s started for agent %s by admin %s", sessionID, agentID, client.ID)
 }
 
 func (h *Handler) handlePtyResize(client *Client, payload map[string]interface{}) {
@@ -183,14 +168,16 @@ func (h *Handler) handlePtyResize(client *Client, payload map[string]interface{}
 		return
 	}
 
+	session := h.hub.ptyManager.GetSession(sessionID)
+	if session == nil || session.UserID != client.ID {
+		return
+	}
+
 	cols := int(getFloat(payload, "cols", 80))
 	rows := int(getFloat(payload, "rows", 24))
 
-	session := h.hub.ptyManager.GetSession(sessionID)
-	if session != nil && session.AgentID == client.ID {
-		session.Cols = cols
-		session.Rows = rows
-	}
+	session.Cols = cols
+	session.Rows = rows
 
 	agentMsg := map[string]interface{}{
 		"type": "pty",
@@ -203,7 +190,7 @@ func (h *Handler) handlePtyResize(client *Client, payload map[string]interface{}
 	}
 
 	msgBytes, _ := json.Marshal(agentMsg)
-	h.hub.SendToAgent(client.ID, msgBytes)
+	h.hub.SendToAgent(session.AgentID, msgBytes)
 }
 
 const maxPtyInputSize = 64 * 1024
@@ -213,6 +200,11 @@ func (h *Handler) handlePtyInput(client *Client, payload map[string]interface{})
 	data := getString(payload, "data")
 
 	if sessionID == "" || data == "" {
+		return
+	}
+
+	session := h.hub.ptyManager.GetSession(sessionID)
+	if session == nil || session.UserID != client.ID {
 		return
 	}
 
@@ -232,7 +224,7 @@ func (h *Handler) handlePtyInput(client *Client, payload map[string]interface{})
 	}
 
 	msgBytes, _ := json.Marshal(agentMsg)
-	h.hub.SendToAgent(client.ID, msgBytes)
+	h.hub.SendToAgent(session.AgentID, msgBytes)
 }
 
 func (h *Handler) handlePtyStop(client *Client, payload map[string]interface{}) {
@@ -242,7 +234,7 @@ func (h *Handler) handlePtyStop(client *Client, payload map[string]interface{}) 
 	}
 
 	session := h.hub.ptyManager.GetSession(sessionID)
-	if session != nil && session.AgentID == client.ID {
+	if session != nil && session.UserID == client.ID {
 		agentMsg := map[string]interface{}{
 			"type": "pty",
 			"payload": PtyPayload{
@@ -252,7 +244,7 @@ func (h *Handler) handlePtyStop(client *Client, payload map[string]interface{}) 
 		}
 
 		msgBytes, _ := json.Marshal(agentMsg)
-		h.hub.SendToAgent(client.ID, msgBytes)
+		h.hub.SendToAgent(session.AgentID, msgBytes)
 	}
 
 	h.hub.ptyManager.RemoveSession(sessionID)
@@ -304,6 +296,7 @@ func (h *Handler) handlePtyOutput(client *Client, payload map[string]interface{}
 		return
 	}
 
+	// Output comes from Agent, send it to Admin
 	msg := map[string]interface{}{
 		"type": "pty_output",
 		"payload": map[string]interface{}{
@@ -311,7 +304,8 @@ func (h *Handler) handlePtyOutput(client *Client, payload map[string]interface{}
 			"data":       data,
 		},
 	}
-	client.WriteJSON(msg)
+	msgBytes, _ := json.Marshal(msg)
+	h.hub.SendToAdmin(session.UserID, msgBytes)
 }
 
 func generateSecureID() string {

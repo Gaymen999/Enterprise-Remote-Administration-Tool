@@ -74,7 +74,13 @@ func secureResolvePath(userInput string) (string, error) {
 		return "", &PathTraversalError{Message: "access denied: path outside sandbox directory"}
 	}
 
-	return cleanedFullPath, nil
+	// Return path relative to sandboxBaseDir so the agent can resolve it against its own sandbox
+	relPath, err := filepath.Rel(absBaseDir, cleanedFullPath)
+	if err != nil {
+		return "", &PathTraversalError{Message: "failed to make path relative"}
+	}
+
+	return relPath, nil
 }
 
 type PathTraversalError struct {
