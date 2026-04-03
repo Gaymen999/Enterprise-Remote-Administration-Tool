@@ -114,6 +114,26 @@ type PtyMessage struct {
 	Payload PtyPayload `json:"payload"`
 }
 
+func (h *Handler) handlePtyMessage(client *Client, msg WSSMessage) {
+	if client.Type != ClientTypeAdmin {
+		return
+	}
+
+	ptyType := getString(msg.Payload, "pty_type")
+	switch ptyType {
+	case "start":
+		h.handlePtyStart(client, msg.Payload)
+	case "resize":
+		h.handlePtyResize(client, msg.Payload)
+	case "input":
+		h.handlePtyInput(client, msg.Payload)
+	case "stop":
+		h.handlePtyStop(client, msg.Payload)
+	default:
+		log.Printf("[PTY] Unknown PTY message type from %s: %s", client.ID, ptyType)
+	}
+}
+
 func (h *Handler) handlePtyStart(client *Client, payload map[string]interface{}) {
 	sessionID := getString(payload, "session_id")
 	agentID := getString(payload, "agent_id")
